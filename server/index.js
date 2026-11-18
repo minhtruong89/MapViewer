@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
 import {
   scrapeGoogleMaps,
   scrapePlaceDetails,
@@ -134,8 +136,18 @@ app.get('/api/place-details', async (req, res) => {
   }
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+// Serve built frontend in production (e.g., Railway)
+const distDir = path.resolve('dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on http://0.0.0.0:${PORT}`);
 });
 
 async function shutdown() {

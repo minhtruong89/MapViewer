@@ -29,19 +29,17 @@ async function launchPersistent(headless) {
     ],
   };
 
-  for (const channel of ['chrome', 'msedge']) {
+  for (const channel of ['chrome', 'msedge', null]) {
     try {
-      return await chromium.launchPersistentContext(PROFILE_DIR, {
-        ...launchOptions,
-        channel,
-      });
+      const opts = channel ? { ...launchOptions, channel } : launchOptions;
+      return await chromium.launchPersistentContext(PROFILE_DIR, opts);
     } catch {
-      // Try next available channel
+      // Try next available browser/channel
     }
   }
 
   throw new Error(
-    'Không tìm thấy trình duyệt Chrome hoặc Microsoft Edge trên máy để chạy công cụ lấy dữ liệu.'
+    'Không tìm thấy trình duyệt Chrome, Microsoft Edge hoặc Playwright Chromium để chạy công cụ lấy dữ liệu.'
   );
 }
 
@@ -76,6 +74,11 @@ async function getContext() {
  * Opens a visible browser window using the shared profile so the user can sign in to Google.
  */
 export async function openLoginBrowser() {
+  if (process.platform === 'linux' && !process.env.DISPLAY) {
+    throw new Error(
+      'Tính năng mở cửa sổ đăng nhập Google chỉ hỗ trợ khi chạy trên máy tính cá nhân (không hỗ trợ trên server Linux không có màn hình).'
+    );
+  }
   if (loginContext) {
     return { ok: true, alreadyOpen: true };
   }

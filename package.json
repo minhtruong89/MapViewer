@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n SERVER,CLIENT -c blue,green \"node server/index.js\" \"vite\"",
+    "start": "node server/index.js",
     "server": "node server/index.js",
     "client": "vite",
     "login": "node server/login.js",
