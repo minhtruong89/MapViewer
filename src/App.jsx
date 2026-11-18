@@ -62,6 +62,7 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginNotice, setLoginNotice] = useState('');
   const [hasProfile, setHasProfile] = useState(false);
+  const [supportsGuiLogin, setSupportsGuiLogin] = useState(false);
 
   // Two main modes: 'search' | 'saved'
   const [activeView, setActiveView] = useState('search');
@@ -129,7 +130,10 @@ export default function App() {
   useEffect(() => {
     fetch('/api/auth/status')
       .then((r) => r.json())
-      .then((d) => setHasProfile(Boolean(d?.hasProfile)))
+      .then((d) => {
+        setHasProfile(Boolean(d?.hasProfile));
+        setSupportsGuiLogin(Boolean(d?.supportsGuiLogin));
+      })
       .catch(() => {});
   }, []);
 
@@ -270,8 +274,8 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
       {/* Top Navbar */}
-      <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-slate-200">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+      <header className="sm:sticky sm:top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center shadow-sm">
               <Compass className="w-5 h-5" />
@@ -321,7 +325,7 @@ export default function App() {
 
           {/* Area Geocode Search (Search mode only) */}
           {activeView === 'search' && (
-            <div className="relative flex-1 max-w-md">
+            <div className="relative w-full md:w-auto md:flex-1 md:max-w-md order-3 md:order-none">
             <form onSubmit={handleGeocode} className="flex items-center gap-2">
               <div className="relative flex-1">
                 <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -364,24 +368,26 @@ export default function App() {
           </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleOpenLogin}
-            disabled={loginLoading}
-            title="Mở trình duyệt để đăng nhập hoặc đổi tài khoản Google"
-            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer shrink-0 disabled:opacity-60 ${
-              hasProfile
-                ? 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
-                : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-            }`}
-          >
-            {loginLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-            ) : (
-              <UserCheck className="w-4 h-4 text-emerald-600" />
-            )}
-            {hasProfile ? 'Hồ sơ Google (đã lưu)' : 'Đăng nhập Google'}
-          </button>
+          {supportsGuiLogin && (
+            <button
+              type="button"
+              onClick={handleOpenLogin}
+              disabled={loginLoading}
+              title="Mở trình duyệt để đăng nhập hoặc đổi tài khoản Google"
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer shrink-0 disabled:opacity-60 ${
+                hasProfile
+                  ? 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                  : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+              }`}
+            >
+              {loginLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+              ) : (
+                <UserCheck className="w-4 h-4 text-emerald-600" />
+              )}
+              {hasProfile ? 'Hồ sơ Google (đã lưu)' : 'Đăng nhập Google'}
+            </button>
+          )}
         </div>
         {loginNotice && (
           <div className="bg-emerald-50 border-t border-emerald-200 px-4 sm:px-6 py-2 text-xs text-emerald-800 flex items-center justify-between gap-3">

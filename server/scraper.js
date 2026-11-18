@@ -110,6 +110,7 @@ export function getAuthStatus() {
   return {
     hasProfile: fs.existsSync(PROFILE_DIR),
     loginOpen: Boolean(loginContext),
+    supportsGuiLogin: !(process.platform === 'linux' && !process.env.DISPLAY),
   };
 }
 
