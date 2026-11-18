@@ -15,6 +15,9 @@ logs/
 *.log
 npm-debug.log*
 
+# Local browser profile (contains Google login session - never commit)
+.browser-profile/
+
 # OS & Editor files
 .DS_Store
 Thumbs.db

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   MapPin,
   Search,
@@ -12,27 +12,31 @@ import {
   AlertCircle,
   ArrowUpDown,
   Sparkles,
+  UserCheck,
+  Map as MapIcon,
 } from 'lucide-react';
 import InteractiveMap from './components/InteractiveMap';
 import PlaceCard from './components/PlaceCard';
 import PlaceModal from './components/PlaceModal';
+import SaveToMapModal from './components/SaveToMapModal';
+import SavedMapsView from './components/SavedMapsView';
+
+const SAVED_MAPS_STORAGE_KEY = 'analyzed_map_saved_v1';
 
 const PRESET_CENTERS = [
   { name: 'Hồ Xuân Hương, Đà Lạt', lat: 11.940419, lng: 108.442254 },
   { name: 'Chợ Đà Lạt', lat: 11.942278, lng: 108.437539 },
-  { name: 'Quảng trường Lâm Viên, Đà Lạt', lat: 11.938361, lng: 108.445444 },
   { name: 'Hồ Tuyền Lâm, Đà Lạt', lat: 11.9012, lng: 108.4325 },
-  { name: 'Phố cổ Hội An', lat: 15.8771, lng: 108.328 },
-  { name: 'Trung tâm Sa Pa', lat: 22.3364, lng: 103.8438 },
+  { name: 'Hoàng Hoa Thám, HCM', lat: 10.80604, lng: 106.69057 },
 ];
 
 export default function App() {
   // Search parameters
   const [center, setCenter] = useState(PRESET_CENTERS[0]);
-  const [radiusKm, setRadiusKm] = useState(3);
+  const [radiusKm, setRadiusKm] = useState(5);
   const [category, setCategory] = useState('all'); // 'all' | 'lodging' | 'restaurant'
   const [customQuery, setCustomQuery] = useState('');
-  const [maxResults, setMaxResults] = useState(30);
+  const [maxResults, setMaxResults] = useState(50);
 
   // Geocode search
   const [locationInput, setLocationInput] = useState('');
@@ -55,6 +59,96 @@ export default function App() {
   // Selection & modal
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [modalPlace, setModalPlace] = useState(null);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginNotice, setLoginNotice] = useState('');
+  const [hasProfile, setHasProfile] = useState(false);
+
+  // Two main modes: 'search' | 'saved'
+  const [activeView, setActiveView] = useState('search');
+  const [savedMaps, setSavedMaps] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SAVED_MAPS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [saveTargetPlace, setSaveTargetPlace] = useState(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SAVED_MAPS_STORAGE_KEY, JSON.stringify(savedMaps));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [savedMaps]);
+
+  const savedPlaceIds = useMemo(() => {
+    const ids = new Set();
+    savedMaps.forEach((m) => m.items.forEach((it) => ids.add(it.id)));
+    return ids;
+  }, [savedMaps]);
+
+  function handleToggleMap(mapId, place) {
+    setSavedMaps((prev) =>
+      prev.map((m) => {
+        if (m.id !== mapId) return m;
+        const exists = m.items.some((it) => it.id === place.id);
+        return {
+          ...m,
+          items: exists
+            ? m.items.filter((it) => it.id !== place.id)
+            : [...m.items, place],
+        };
+      })
+    );
+  }
+
+  function handleCreateAndSave(mapName, place) {
+    const newMap = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: mapName,
+      createdAt: new Date().toISOString(),
+      items: [place],
+    };
+    setSavedMaps((prev) => [newMap, ...prev]);
+  }
+
+  function handleRemoveItemFromMap(mapId, placeId) {
+    setSavedMaps((prev) =>
+      prev.map((m) =>
+        m.id === mapId ? { ...m, items: m.items.filter((it) => it.id !== placeId) } : m
+      )
+    );
+  }
+
+  function handleDeleteMap(mapId) {
+    setSavedMaps((prev) => prev.filter((m) => m.id !== mapId));
+  }
+
+  useEffect(() => {
+    fetch('/api/auth/status')
+      .then((r) => r.json())
+      .then((d) => setHasProfile(Boolean(d?.hasProfile)))
+      .catch(() => {});
+  }, []);
+
+  async function handleOpenLogin() {
+    setLoginLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/auth/login', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Không thể mở trình duyệt đăng nhập.');
+      setLoginNotice(
+        'Đã mở cửa sổ Chrome/Edge tới Google Maps. Hãy đăng nhập tài khoản Google của bạn, sau đó ĐÓNG cửa sổ trình duyệt đó rồi bấm quét lại.'
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoginLoading(false);
+    }
+  }
 
   async function handleGeocode(e) {
     e.preventDefault();
@@ -187,13 +281,47 @@ export default function App() {
                 MapAnalyzer
               </h1>
               <p className="text-xs text-slate-500">
-                Phân tích Nơi ở & Quán ăn từ Google Maps theo bán kính
+                Phân tích Nơi ở & Ăn uống từ Google Maps theo bán kính
               </p>
             </div>
           </div>
 
-          {/* Area Geocode Search */}
-          <div className="relative flex-1 max-w-md">
+          {/* Main Mode Switcher: Tìm kiếm / Xem map */}
+          <div className="inline-flex items-center p-1 rounded-2xl bg-slate-100 border border-slate-200/80">
+            <button
+              type="button"
+              onClick={() => setActiveView('search')}
+              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                activeView === 'search'
+                  ? 'bg-white text-blue-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+              Tìm kiếm
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveView('saved')}
+              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                activeView === 'saved'
+                  ? 'bg-white text-blue-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <MapIcon className="w-3.5 h-3.5" />
+              Xem map
+              {savedMaps.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-extrabold">
+                  {savedMaps.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Area Geocode Search (Search mode only) */}
+          {activeView === 'search' && (
+            <div className="relative flex-1 max-w-md">
             <form onSubmit={handleGeocode} className="flex items-center gap-2">
               <div className="relative flex-1">
                 <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -234,11 +362,52 @@ export default function App() {
               </div>
             )}
           </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleOpenLogin}
+            disabled={loginLoading}
+            title="Mở trình duyệt để đăng nhập hoặc đổi tài khoản Google"
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer shrink-0 disabled:opacity-60 ${
+              hasProfile
+                ? 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+            }`}
+          >
+            {loginLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+            ) : (
+              <UserCheck className="w-4 h-4 text-emerald-600" />
+            )}
+            {hasProfile ? 'Hồ sơ Google (đã lưu)' : 'Đăng nhập Google'}
+          </button>
         </div>
+        {loginNotice && (
+          <div className="bg-emerald-50 border-t border-emerald-200 px-4 sm:px-6 py-2 text-xs text-emerald-800 flex items-center justify-between gap-3">
+            <span>{loginNotice}</span>
+            <button
+              type="button"
+              onClick={() => setLoginNotice('')}
+              className="font-bold hover:underline cursor-pointer shrink-0"
+            >
+              Đã hiểu
+            </button>
+          </div>
+        )}
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+      {activeView === 'saved' ? (
+        <SavedMapsView
+          savedMaps={savedMaps}
+          onDeleteMap={handleDeleteMap}
+          onRemoveItem={handleRemoveItemFromMap}
+          onOpenDetails={(p) => setModalPlace(p)}
+          onSwitchToSearch={() => setActiveView('search')}
+        />
+      ) : (
+        <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Left Sidebar: Controls */}
         <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-5">
@@ -322,7 +491,7 @@ export default function App() {
                 {[
                   { id: 'all', label: 'Tất cả', icon: Layers },
                   { id: 'lodging', label: 'Nơi ở', icon: BedDouble },
-                  { id: 'restaurant', label: 'Quán ăn', icon: Utensils },
+                  { id: 'restaurant', label: 'Ăn uống', icon: Utensils },
                 ].map((item) => {
                   const Icon = item.icon;
                   const active = category === item.id;
@@ -370,9 +539,10 @@ export default function App() {
                 >
                   <option value={20}>20</option>
                   <option value={30}>30</option>
-                  <option value={45}>45</option>
-                  <option value={60}>60</option>
+                  <option value={50}>50</option>
                   <option value={100}>100</option>
+                  <option value={150}>150</option>
+                  <option value={200}>200</option>
                 </select>
               </div>
             </div>
@@ -429,7 +599,7 @@ export default function App() {
               <p className="text-xs text-slate-500 font-medium">Địa điểm tìm thấy</p>
               <p className="text-2xl font-extrabold text-slate-900 mt-1">{stats.total}</p>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                {stats.lodgingCount} nơi ở · {stats.restaurantCount} quán ăn
+                {stats.lodgingCount} nơi ở · {stats.restaurantCount} ăn uống
               </p>
             </div>
             <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
@@ -473,7 +643,7 @@ export default function App() {
             >
               <option value="all">Tất cả loại</option>
               <option value="lodging">Chỉ Nơi ở</option>
-              <option value="restaurant">Chỉ Quán ăn</option>
+              <option value="restaurant">Chỉ Ăn uống</option>
             </select>
 
             {/* Min rating */}
@@ -546,8 +716,10 @@ export default function App() {
                   key={place.id}
                   place={place}
                   isSelected={selectedPlace?.id === place.id}
+                  isSaved={savedPlaceIds.has(place.id)}
                   onSelect={(p) => setSelectedPlace(p)}
                   onOpenDetails={(p) => setModalPlace(p)}
+                  onSave={(p) => setSaveTargetPlace(p)}
                 />
               ))}
             </div>
@@ -570,6 +742,18 @@ export default function App() {
           )}
         </section>
       </main>
+      )}
+
+      {/* Save to Map Modal */}
+      {saveTargetPlace && (
+        <SaveToMapModal
+          place={saveTargetPlace}
+          savedMaps={savedMaps}
+          onToggleMap={handleToggleMap}
+          onCreateAndSave={handleCreateAndSave}
+          onClose={() => setSaveTargetPlace(null)}
+        />
+      )}
 
       {/* Detail & Photo Gallery Modal */}
       {modalPlace && (

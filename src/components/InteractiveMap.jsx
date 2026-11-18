@@ -9,6 +9,14 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function createColoredPin(color, label) {
   return L.divIcon({
     className: 'custom-pin',
@@ -26,6 +34,50 @@ function createColoredPin(color, label) {
       border:2px solid #fff;
       box-shadow:0 2px 8px rgba(0,0,0,0.28);
     ">${label}</div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+function createLabeledPin(isLodging, name, rating) {
+  const bg = isLodging ? '#4338ca' : '#e11d48';
+  const shortName = escapeHtml(name.length > 26 ? name.slice(0, 25) + '…' : name);
+  const ratingLabel = rating ? rating.toFixed(1) : '?';
+
+  return L.divIcon({
+    className: 'custom-pin',
+    html: `<div style="position:relative;width:28px;height:28px;">
+      <div style="
+        position:absolute;
+        bottom:33px;
+        left:50%;
+        transform:translateX(-50%);
+        background:${bg};
+        color:#ffffff;
+        padding:3px 9px;
+        border-radius:9999px;
+        font-size:11px;
+        font-weight:700;
+        white-space:nowrap;
+        border:2px solid #ffffff;
+        box-shadow:0 2px 8px rgba(0,0,0,0.28);
+        pointer-events:none;
+      ">${shortName}</div>
+      <div style="
+        background:${bg};
+        color:#ffffff;
+        width:28px;
+        height:28px;
+        border-radius:9999px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size:11px;
+        font-weight:700;
+        border:2px solid #ffffff;
+        box-shadow:0 2px 8px rgba(0,0,0,0.3);
+      ">${ratingLabel}</div>
+    </div>`,
     iconSize: [28, 28],
     iconAnchor: [14, 14],
   });
@@ -52,6 +104,7 @@ export default function InteractiveMap({
   selectedPlace,
   onCenterChange,
   onSelectPlace,
+  showSearchCenter = true,
 }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
@@ -63,8 +116,9 @@ export default function InteractiveMap({
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
+    const initialCenter = center ? [center.lat, center.lng] : [11.940419, 108.442254];
     const map = L.map(mapContainerRef.current, {
-      center: [center.lat, center.lng],
+      center: initialCenter,
       zoom: 14,
       zoomControl: true,
     });
@@ -76,13 +130,15 @@ export default function InteractiveMap({
 
     placesLayerRef.current = L.layerGroup().addTo(map);
 
-    map.on('click', (e) => {
-      onCenterChange({
-        lat: Number(e.latlng.lat.toFixed(6)),
-        lng: Number(e.latlng.lng.toFixed(6)),
-        name: `Tọa độ (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`,
+    if (onCenterChange) {
+      map.on('click', (e) => {
+        onCenterChange({
+          lat: Number(e.latlng.lat.toFixed(6)),
+          lng: Number(e.latlng.lng.toFixed(6)),
+          name: `Tọa độ (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`,
+        });
       });
-    });
+    }
 
     mapRef.current = map;
 
@@ -95,10 +151,22 @@ export default function InteractiveMap({
     };
   }, []);
 
-  // Update center marker and radius circle
+  // Update center marker and radius circle (Search mode)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+
+    if (!showSearchCenter || !center) {
+      if (centerMarkerRef.current) {
+        centerMarkerRef.current.remove();
+        centerMarkerRef.current = null;
+      }
+      if (circleRef.current) {
+        circleRef.current.remove();
+        circleRef.current = null;
+      }
+      return;
+    }
 
     if (centerMarkerRef.current) {
       centerMarkerRef.current.setLatLng([center.lat, center.lng]);
@@ -129,24 +197,29 @@ export default function InteractiveMap({
     }
 
     map.fitBounds(circleRef.current.getBounds(), { padding: [28, 28], maxZoom: 15 });
-  }, [center.lat, center.lng, center.name, radiusKm]);
+  }, [showSearchCenter, center?.lat, center?.lng, center?.name, radiusKm]);
 
   // Render place markers
   useEffect(() => {
+    const map = mapRef.current;
     const layer = placesLayerRef.current;
-    if (!layer) return;
+    if (!layer || !map) return;
 
     layer.clearLayers();
+    const coords = [];
 
     places.forEach((place) => {
       if (place.lat == null || place.lng == null) return;
+      coords.push([place.lat, place.lng]);
 
       const isLodging = place.type === 'lodging';
       const color = isLodging ? '#4f46e5' : '#d97706';
       const ratingLabel = place.rating ? place.rating.toFixed(1) : '?';
 
       const marker = L.marker([place.lat, place.lng], {
-        icon: createColoredPin(color, ratingLabel),
+        icon: showSearchCenter
+          ? createColoredPin(color, ratingLabel)
+          : createLabeledPin(isLodging, place.name, place.rating),
       });
 
       const popupHtml = `
@@ -156,7 +229,7 @@ export default function InteractiveMap({
             ⭐ <b>${place.rating || 'N/A'}</b> (${place.reviewCount.toLocaleString('vi-VN')} đánh giá)
           </div>
           ${
-            place.distanceKm !== null
+            place.distanceKm !== null && showSearchCenter
               ? `<div style="font-size:11px;color:#64748b;">Cách tâm ${place.distanceKm} km</div>`
               : ''
           }
@@ -169,7 +242,11 @@ export default function InteractiveMap({
       });
       marker.addTo(layer);
     });
-  }, [places, onSelectPlace]);
+
+    if (!showSearchCenter && coords.length > 0) {
+      map.fitBounds(L.latLngBounds(coords), { padding: [45, 45], maxZoom: 15 });
+    }
+  }, [places, onSelectPlace, showSearchCenter]);
 
   // Pan to selected place
   useEffect(() => {
@@ -182,14 +259,21 @@ export default function InteractiveMap({
     <div className="relative w-full h-full rounded-2xl overflow-hidden border border-slate-200 shadow-sm bg-slate-100">
       <div ref={mapContainerRef} className="w-full h-full z-0" />
       <div className="absolute bottom-3 left-3 z-[400] bg-white/95 backdrop-blur px-3 py-1.5 rounded-lg shadow-sm border border-slate-200 text-xs text-slate-600 flex items-center gap-3 pointer-events-none">
-        <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block" /> Tâm
-        </span>
+        {showSearchCenter && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block" /> Tâm
+          </span>
+        )}
         <span className="flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 inline-block" /> Nơi ở
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-amber-600 inline-block" /> Quán ăn
+          <span
+            className={`w-2.5 h-2.5 rounded-full inline-block ${
+              showSearchCenter ? 'bg-amber-600' : 'bg-rose-600'
+            }`}
+          />{' '}
+          Ăn uống
         </span>
       </div>
     </div>

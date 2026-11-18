@@ -1,18 +1,27 @@
 import { chromium } from 'playwright-core';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
-let browserInstance = null;
+const PROFILE_DIR = path.resolve('.browser-profile');
+
+let contextInstance = null;
+let loginContext = null;
 
 /**
- * Lazily launches and reuses a headless Chromium browser (Chrome or Edge on Windows).
+ * Launches a persistent browser context with the given headless mode.
  */
-async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
-  }
-
+async function launchPersistent(headless) {
   const launchOptions = {
-    headless: true,
+    headless,
+    locale: 'vi-VN',
+    viewport: headless ? { width: 1366, height: 900 } : null,
+    ...(headless
+      ? {
+          userAgent:
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        }
+      : {}),
     args: [
       '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
@@ -22,8 +31,10 @@ async function getBrowser() {
 
   for (const channel of ['chrome', 'msedge']) {
     try {
-      browserInstance = await chromium.launch({ ...launchOptions, channel });
-      return browserInstance;
+      return await chromium.launchPersistentContext(PROFILE_DIR, {
+        ...launchOptions,
+        channel,
+      });
     } catch {
       // Try next available channel
     }
@@ -35,12 +46,81 @@ async function getBrowser() {
 }
 
 /**
- * Closes the shared browser instance gracefully.
+ * Lazily launches and reuses a persistent headless Chromium context.
+ */
+async function getContext() {
+  if (loginContext) {
+    throw new Error(
+      'Cửa sổ đăng nhập Google đang mở. Vui lòng hoàn tất đăng nhập và đóng cửa sổ trình duyệt đó trước khi quét.'
+    );
+  }
+
+  if (contextInstance) {
+    try {
+      // Verify context is still alive
+      contextInstance.pages();
+      return contextInstance;
+    } catch {
+      contextInstance = null;
+    }
+  }
+
+  contextInstance = await launchPersistent(true);
+  contextInstance.on('close', () => {
+    contextInstance = null;
+  });
+  return contextInstance;
+}
+
+/**
+ * Opens a visible browser window using the shared profile so the user can sign in to Google.
+ */
+export async function openLoginBrowser() {
+  if (loginContext) {
+    return { ok: true, alreadyOpen: true };
+  }
+
+  // Close headless context first because a persistent profile allows one instance at a time
+  if (contextInstance) {
+    await contextInstance.close().catch(() => {});
+    contextInstance = null;
+  }
+
+  loginContext = await launchPersistent(false);
+  loginContext.on('close', () => {
+    loginContext = null;
+  });
+
+  const page = loginContext.pages()[0] || (await loginContext.newPage());
+  await page.goto('https://www.google.com/maps?hl=vi', {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000,
+  }).catch(() => {});
+
+  return { ok: true, alreadyOpen: false };
+}
+
+/**
+ * Returns whether a local browser profile exists and whether the login window is currently open.
+ */
+export function getAuthStatus() {
+  return {
+    hasProfile: fs.existsSync(PROFILE_DIR),
+    loginOpen: Boolean(loginContext),
+  };
+}
+
+/**
+ * Closes the shared browser context gracefully.
  */
 export async function closeBrowser() {
-  if (browserInstance) {
-    await browserInstance.close().catch(() => {});
-    browserInstance = null;
+  if (loginContext) {
+    await loginContext.close().catch(() => {});
+    loginContext = null;
+  }
+  if (contextInstance) {
+    await contextInstance.close().catch(() => {});
+    contextInstance = null;
   }
 }
 
@@ -87,6 +167,21 @@ function upgradePhotoUrl(url) {
 }
 
 /**
+ * Navigates to a URL with a single retry on transient network/timeout errors.
+ */
+async function gotoWithRetry(page, url, timeout = 30000) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'commit', timeout });
+      return;
+    } catch (err) {
+      if (attempt === 1) throw err;
+      await page.waitForTimeout(1000);
+    }
+  }
+}
+
+/**
  * Dismisses Google consent banner if present; throws if CAPTCHA/block is detected.
  */
 async function checkPageAndConsent(page) {
@@ -129,14 +224,7 @@ async function scrapeSingleQuery({
   type,
   maxResults,
 }) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({
-    locale: 'vi-VN',
-    viewport: { width: 1366, height: 900 },
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  });
-
+  const context = await getContext();
   const page = await context.newPage();
 
   try {
@@ -145,7 +233,7 @@ async function scrapeSingleQuery({
       searchTerm
     )}/@${searchLat},${searchLng},${zoom}z?hl=vi`;
 
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await gotoWithRetry(page, targetUrl, 30000);
     await page.waitForTimeout(2000);
     await checkPageAndConsent(page);
 
@@ -171,8 +259,15 @@ async function scrapeSingleQuery({
           document.querySelector('div.F7nice span[aria-hidden="true"]')?.textContent?.trim() || '';
         const reviewEl =
           document.querySelector('div.F7nice span[aria-label*="đánh giá"]') ||
-          document.querySelector('div.F7nice span[aria-label*="review"]');
-        const reviewText = reviewEl?.textContent?.trim() || reviewEl?.getAttribute('aria-label') || '';
+          document.querySelector('div.F7nice span[aria-label*="review"]') ||
+          document.querySelector('[role="main"] [aria-label*="bài đánh giá"]') ||
+          document.querySelector('[role="main"] [aria-label*="reviews"]');
+        const f7Text = document.querySelector('div.F7nice')?.textContent || '';
+        const parenMatch = f7Text.match(/\(([^)]+)\)/);
+        const reviewText =
+          reviewEl?.textContent?.trim() ||
+          reviewEl?.getAttribute('aria-label') ||
+          (parenMatch ? parenMatch[1] : '');
         const categoryLabel =
           document.querySelector('button[jsaction*="category"]')?.textContent?.trim() || '';
         const address =
@@ -215,7 +310,7 @@ async function scrapeSingleQuery({
           rating: Number.isNaN(rating) ? 0 : rating,
           reviewCount: Number.isNaN(reviewCount) ? 0 : reviewCount,
           distanceKm,
-          categoryLabel: single.categoryLabel || (type === 'lodging' ? 'Nơi ở' : 'Quán ăn'),
+          categoryLabel: single.categoryLabel || (type === 'lodging' ? 'Nơi ở' : 'Ăn uống'),
           address: single.address.replace(/[\uE000-\uF8FF]/g, '').trim(),
           priceLevel: '',
           imageUrl: upgradePhotoUrl(single.heroImg),
@@ -229,7 +324,7 @@ async function scrapeSingleQuery({
     // Scroll feed in steps so lazy-loaded images and all results load quickly
     let previousCount = 0;
     let stagnantRounds = 0;
-    const maxScrolls = Math.min(22, Math.ceil(maxResults / 5) + 4);
+    const maxScrolls = Math.min(45, Math.ceil(maxResults / 5) + 4);
 
     for (let i = 0; i < maxScrolls; i++) {
       const currentCount = await page.locator('a.hfpxzc').count();
@@ -267,26 +362,29 @@ async function scrapeSingleQuery({
       const cards = Array.from(document.querySelectorAll('div.Nv2PK'));
       for (const card of cards) {
         const hasImg = Array.from(card.querySelectorAll('img')).some((img) => {
-          const s = img.getAttribute('src') || '';
+          const s = img.currentSrc || img.getAttribute('src') || '';
           return s.includes('googleusercontent.com') || s.includes('streetviewpixels');
         });
         if (!hasImg) {
           card.scrollIntoView({ behavior: 'instant', block: 'center' });
-          await new Promise((r) => setTimeout(r, 180));
+          await new Promise((r) => setTimeout(r, 250));
         }
       }
     });
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(900);
 
     const rawPlaces = await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('div.Nv2PK'));
       return cards.map((card) => {
         const linkEl = card.querySelector('a.hfpxzc');
         const href = linkEl?.getAttribute('href') || '';
-        const name =
-          linkEl?.getAttribute('aria-label') ||
+        const rawName =
           card.querySelector('.qBF1Pd')?.textContent?.trim() ||
+          linkEl?.getAttribute('aria-label') ||
           '';
+        const name = rawName
+          .replace(/\s*[·•\-]?\s*(Đường liên kết đã truy cập|Visited link)\s*$/i, '')
+          .trim();
 
         const ratingText = card.querySelector('span.MW4etd')?.textContent?.trim() || '';
         const reviewText = card.querySelector('span.UY7F9')?.textContent?.trim() || '';
@@ -300,7 +398,7 @@ async function scrapeSingleQuery({
         const imgs = Array.from(card.querySelectorAll('img'));
         let imageUrl = '';
         for (const img of imgs) {
-          const src = img.getAttribute('src') || '';
+          const src = img.currentSrc || img.getAttribute('src') || '';
           if (
             src.includes('googleusercontent.com') ||
             src.includes('streetviewpixels') ||
@@ -375,14 +473,14 @@ async function scrapeSingleQuery({
         .map((p) => p.trim())
         .filter(Boolean);
 
-      let categoryLabel = type === 'lodging' ? 'Nơi ở' : 'Quán ăn';
+      let categoryLabel = type === 'lodging' ? 'Nơi ở' : 'Ăn uống';
       let address = '';
       let priceLevel = '';
 
       for (const part of parts) {
         if (/^[₫$]+$/.test(part) || /\d+\s*₫/.test(part)) {
           priceLevel = part;
-        } else if (!categoryLabel || part.length < 28 && !/\d/.test(part) && !address) {
+        } else if ((!categoryLabel || part.length < 28) && !/\d/.test(part) && !address) {
           categoryLabel = part;
         } else if (!address) {
           address = part;
@@ -400,9 +498,22 @@ async function scrapeSingleQuery({
           .trim();
       }
 
+      const resolvedType =
+        type === 'auto'
+          ? /khách sạn|hotel|homestay|resort|villa|hostel|nhà nghỉ|nhà khách|nơi ở|căn hộ|lưu trú|motel|bungalow/i.test(
+              `${item.name} ${categoryLabel} ${detailLine}`
+            )
+            ? 'lodging'
+            : 'restaurant'
+          : type;
+
+      if (resolvedType === 'lodging' && categoryLabel === 'Ăn uống') {
+        categoryLabel = 'Nơi ở';
+      }
+
       results.push({
         id: crypto.createHash('sha1').update(item.href).digest('hex').slice(0, 16),
-        type,
+        type: resolvedType,
         name: item.name,
         rating: Number.isNaN(rating) ? 0 : rating,
         reviewCount: Number.isNaN(reviewCount) ? 0 : reviewCount,
@@ -419,9 +530,46 @@ async function scrapeSingleQuery({
       if (results.length >= maxResults) break;
     }
 
+    // If Google Maps rendered compact text-only cards (no <img> in feed), fetch hero thumbnails
+    const missingThumbs = results.filter((r) => !r.imageUrl);
+    if (results.length <= 15 && missingThumbs.length > 0) {
+      for (let i = 0; i < missingThumbs.length; i += 4) {
+        const batch = missingThumbs.slice(i, i + 4);
+        await Promise.all(
+          batch.map(async (item) => {
+            const thumbPage = await context.newPage();
+            try {
+              const cleanUrl = item.mapsUrl.split('?')[0] + '?hl=vi';
+              await gotoWithRetry(thumbPage, cleanUrl, 15000);
+              await thumbPage
+                .waitForSelector('button[jsaction*="heroHeaderImage"] img, button.aoRNLd img', {
+                  timeout: 6000,
+                })
+                .catch(() => {});
+              const heroSrc = await thumbPage.evaluate(() => {
+                return (
+                  document.querySelector('button[jsaction*="heroHeaderImage"] img')?.getAttribute('src') ||
+                  document.querySelector('button.aoRNLd img')?.getAttribute('src') ||
+                  Array.from(document.querySelectorAll('img[src*="googleusercontent.com"]'))
+                    .map((im) => im.getAttribute('src') || '')
+                    .find((s) => !s.includes('/a/')) ||
+                  ''
+                );
+              });
+              item.imageUrl = upgradePhotoUrl(heroSrc);
+            } catch {
+              // Keep null if thumbnail fetch fails
+            } finally {
+              await thumbPage.close().catch(() => {});
+            }
+          })
+        );
+      }
+    }
+
     return results;
   } finally {
-    await context.close().catch(() => {});
+    await page.close().catch(() => {});
   }
 }
 
@@ -439,7 +587,7 @@ export async function scrapeGoogleMaps({
   const tasks = [];
 
   if (customQuery && customQuery.trim()) {
-    const inferredType = category === 'lodging' ? 'lodging' : 'restaurant';
+    const inferredType = category === 'all' ? 'auto' : category;
     tasks.push({
       searchTerm: customQuery.trim(),
       type: inferredType,
@@ -491,29 +639,22 @@ export async function scrapeGoogleMaps({
 }
 
 /**
- * Fetches additional photos, metadata, and up to 30 newest reviews for a Google Maps place URL.
+ * Fetches additional photos & metadata for a specific Google Maps place URL.
  */
 export async function scrapePlaceDetails(mapsUrl) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({
-    locale: 'vi-VN',
-    viewport: { width: 1280, height: 850 },
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  });
-
+  const context = await getContext();
   const page = await context.newPage();
 
   try {
-    await page.goto(mapsUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(1800);
+    const cleanUrl = mapsUrl.split('?')[0] + '?hl=vi';
+    await gotoWithRetry(page, cleanUrl, 30000);
+    await page.waitForTimeout(2000);
     await checkPageAndConsent(page);
 
     await page
-      .waitForSelector('h1.DUwDvf, button[jsaction*="photo"]', { timeout: 10000 })
+      .waitForSelector('h1.DUwDvf, button[jsaction*="photo"]', { timeout: 15000 })
       .catch(() => {});
 
-    // 1. Extract overview info & photos first
     const details = await page.evaluate(() => {
       const address =
         document.querySelector('button[data-item-id="address"]')?.textContent?.trim() || '';
@@ -544,7 +685,6 @@ export async function scrapePlaceDetails(mapsUrl) {
         website,
         hours,
         photos: Array.from(photoUrls).slice(0, 12),
-        reviews: [],
       };
     });
 
@@ -552,109 +692,8 @@ export async function scrapePlaceDetails(mapsUrl) {
       .map((u) => u.replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w1000-h750-k-no'))
       .filter(Boolean);
 
-    // 2. Switch to "Bài đánh giá" (Reviews) tab and sort by "Mới nhất" (Newest)
-    const reviewsTab = page.locator(
-      'button[role="tab"]:has-text("Bài đánh giá"), button[role="tab"]:has-text("Reviews")'
-    );
-
-    if ((await reviewsTab.count()) > 0) {
-      await reviewsTab.first().click().catch(() => {});
-      await page.waitForTimeout(1500);
-
-      // Click Sort button ("Sắp xếp" / "Sort")
-      const sortBtn = page.locator(
-        'button[aria-label*="Sắp xếp"], button[aria-label*="Sort"], button:has-text("Sắp xếp")'
-      );
-      if ((await sortBtn.count()) > 0) {
-        await sortBtn.first().click().catch(() => {});
-        await page.waitForTimeout(700);
-
-        const newestOption = page.locator(
-          'div[role="menuitemradio"]:has-text("Mới nhất"), div[role="menuitemradio"]:has-text("Newest"), [data-index="1"][role="menuitemradio"]'
-        );
-        if ((await newestOption.count()) > 0) {
-          await newestOption.first().click().catch(() => {});
-          await page.waitForTimeout(1500);
-        }
-      }
-
-      // Scroll the reviews scrollable container until 30 reviews are loaded
-      let prevReviews = 0;
-      let stagnant = 0;
-      for (let i = 0; i < 18; i++) {
-        const count = await page.locator('div.jftiEf').count();
-        if (count >= 30) break;
-
-        if (count === prevReviews) {
-          stagnant++;
-          if (stagnant >= 3) break;
-        } else {
-          stagnant = 0;
-        }
-        prevReviews = count;
-
-        const box = await page.locator('div.jftiEf').last().boundingBox().catch(() => null);
-        if (box) {
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-          await page.mouse.wheel(0, 2500);
-        }
-        await page.evaluate(() => {
-          const firstCard = document.querySelector('div.jftiEf');
-          let el = firstCard?.parentElement;
-          while (el && el !== document.body) {
-            if (el.scrollHeight > el.clientHeight + 20) {
-              el.scrollTop = el.scrollHeight;
-              return;
-            }
-            el = el.parentElement;
-          }
-          const container = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf');
-          if (container) container.scrollTop = container.scrollHeight;
-        });
-        await page.waitForTimeout(stagnant > 0 ? 1400 : 900);
-      }
-
-      // Expand truncated "Thêm" / "More" review text
-      await page.evaluate(() => {
-        document.querySelectorAll('div.jftiEf button.w8nwRe').forEach((btn) => btn.click());
-      });
-      await page.waitForTimeout(300);
-
-      details.reviews = await page.evaluate(() => {
-        const cards = Array.from(document.querySelectorAll('div.jftiEf')).slice(0, 30);
-        return cards.map((card, idx) => {
-          const author = card.querySelector('.d4r55')?.textContent?.trim() || 'Người dùng Google';
-          const authorPhoto = card.querySelector('img.NBa7we')?.getAttribute('src') || '';
-          const ratingLabel =
-            card.querySelector('span.kvMYJc')?.getAttribute('aria-label') || '';
-          const ratingMatch = ratingLabel.match(/(\d+(?:[.,]\d+)?)/);
-          const rating = ratingMatch ? parseFloat(ratingMatch[1].replace(',', '.')) : 0;
-          const relativeTime = card.querySelector('span.rsqaWe')?.textContent?.trim() || '';
-          const text = card.querySelector('span.wiI7pd')?.textContent?.trim() || '';
-
-          const reviewPhotos = Array.from(card.querySelectorAll('div.KtCyie button'))
-            .map((btn) => {
-              const bg = btn.style?.backgroundImage || '';
-              const m = bg.match(/url\(["']?(.*?)["']?\)/);
-              return m ? m[1].replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w600-h450-k-no') : null;
-            })
-            .filter(Boolean);
-
-          return {
-            id: `${idx}-${author}`,
-            author,
-            authorPhoto,
-            rating,
-            relativeTime,
-            text,
-            photos: reviewPhotos,
-          };
-        });
-      });
-    }
-
     return details;
   } finally {
-    await context.close().catch(() => {});
+    await page.close().catch(() => {});
   }
 }

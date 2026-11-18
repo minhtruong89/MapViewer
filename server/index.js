@@ -1,6 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import { scrapeGoogleMaps, scrapePlaceDetails, closeBrowser } from './scraper.js';
+import {
+  scrapeGoogleMaps,
+  scrapePlaceDetails,
+  openLoginBrowser,
+  getAuthStatus,
+  closeBrowser,
+} from './scraper.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -10,6 +16,22 @@ app.use(express.json());
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+app.get('/api/auth/status', (_req, res) => {
+  res.json(getAuthStatus());
+});
+
+app.post('/api/auth/login', async (_req, res) => {
+  try {
+    const result = await openLoginBrowser();
+    res.json(result);
+  } catch (err) {
+    console.error('Login browser error:', err);
+    res.status(500).json({
+      error: err.message || 'Không thể mở cửa sổ đăng nhập Google.',
+    });
+  }
 });
 
 /**
@@ -55,15 +77,15 @@ app.get('/api/geocode', async (req, res) => {
  * Searches Google Maps around a center coordinate within a radius.
  */
 app.post('/api/search', async (req, res) => {
-  const { lat, lng, radiusKm = 3, category = 'all', customQuery = '', maxResults = 30 } =
+  const { lat, lng, radiusKm = 5, category = 'all', customQuery = '', maxResults = 50 } =
     req.body || {};
 
   if (typeof lat !== 'number' || typeof lng !== 'number') {
     return res.status(400).json({ error: 'Tọa độ tâm (lat, lng) không hợp lệ.' });
   }
 
-  const clampedRadius = Math.max(0.2, Math.min(30, Number(radiusKm) || 3));
-  const clampedMax = Math.max(5, Math.min(100, Number(maxResults) || 30));
+  const clampedRadius = Math.max(0.2, Math.min(30, Number(radiusKm) || 5));
+  const clampedMax = Math.max(5, Math.min(200, Number(maxResults) || 50));
 
   try {
     const places = await scrapeGoogleMaps({

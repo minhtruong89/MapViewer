@@ -7,6 +7,7 @@
     "dev": "concurrently -k -n SERVER,CLIENT -c blue,green \"node server/index.js\" \"vite\"",
     "server": "node server/index.js",
     "client": "vite",
+    "login": "node server/login.js",
     "build": "vite build"
   },
   "dependencies": {
