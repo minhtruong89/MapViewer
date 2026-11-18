@@ -8,6 +8,7 @@ import {
   MessageSquareText,
   Bookmark,
   Trash2,
+  Phone,
 } from 'lucide-react';
 
 export default function PlaceCard({
@@ -100,9 +101,21 @@ export default function PlaceCard({
           {place.categoryLabel}
         </p>
         {place.address && (
-          <p className="text-xs text-slate-500 flex items-start gap-1 line-clamp-2 mb-3">
+          <p className="text-xs text-slate-500 flex items-start gap-1 line-clamp-2 mb-1.5">
             <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
             <span>{place.address}</span>
+          </p>
+        )}
+        {place.phone && (
+          <p className="text-xs text-slate-600 flex items-center gap-1 mb-3">
+            <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <a
+              href={`tel:${place.phone.replace(/\s+/g, '')}`}
+              onClick={(e) => e.stopPropagation()}
+              className="hover:text-blue-600 hover:underline font-medium"
+            >
+              {place.phone}
+            </a>
           </p>
         )}
 

@@ -276,6 +276,8 @@ async function scrapeSingleQuery({
           document.querySelector('button[jsaction*="category"]')?.textContent?.trim() || '';
         const address =
           document.querySelector('button[data-item-id="address"]')?.textContent?.trim() || '';
+        const phone =
+          document.querySelector('button[data-item-id^="phone:"]')?.textContent?.trim() || '';
         const heroImg =
           document.querySelector('button[jsaction*="heroHeaderImage"] img')?.getAttribute('src') ||
           document.querySelector('button.aoRNLd img')?.getAttribute('src') ||
@@ -283,7 +285,7 @@ async function scrapeSingleQuery({
             .map((i) => i.getAttribute('src') || '')
             .find((s) => !s.includes('/a/')) ||
           '';
-        return { name, ratingText, reviewText, categoryLabel, address, heroImg };
+        return { name, ratingText, reviewText, categoryLabel, address, phone, heroImg };
       });
 
       if (!single.name) return [];
@@ -316,6 +318,7 @@ async function scrapeSingleQuery({
           distanceKm,
           categoryLabel: single.categoryLabel || (type === 'lodging' ? 'Nơi ở' : 'Ăn uống'),
           address: single.address.replace(/[\uE000-\uF8FF]/g, '').trim(),
+          phone: single.phone.replace(/[\uE000-\uF8FF]/g, '').trim(),
           priceLevel: '',
           imageUrl: upgradePhotoUrl(single.heroImg),
           lat: itemLat,
@@ -498,6 +501,21 @@ async function scrapeSingleQuery({
       if (address) {
         address = address
           .replace(/(Đang mở cửa|Đã đóng cửa|Sắp đóng cửa|Sắp mở cửa|Mở cửa cả ngày)/g, ' · $1')
+          .replace(/(\+84[\d\s.-]{7,})/g, ' · $1')
+          .replace(/^\s*·\s*/, '')
+          .replace(/\s*·\s*·\s*/g, ' · ')
+          .trim();
+      }
+
+      // Extract phone number from infoBlocks or address if present
+      const allInfoText = item.infoBlocks.join(' · ').replace(/[\uE000-\uF8FF]/g, '');
+      const phoneMatch = allInfoText.match(/(\+84[\d\s.-]{7,}|0\d{2,3}[\s.-]?\d{3}[\s.-]?\d{3,4})/);
+      const phone = phoneMatch ? phoneMatch[1].trim() : '';
+
+      if (phone && address) {
+        address = address
+          .replace(phone, '')
+          .replace(/\s*·\s*$/, '')
           .replace(/^\s*·\s*/, '')
           .trim();
       }
@@ -524,6 +542,7 @@ async function scrapeSingleQuery({
         distanceKm,
         categoryLabel,
         address,
+        phone,
         priceLevel,
         imageUrl: upgradePhotoUrl(item.imageUrl),
         lat: itemLat,
@@ -534,11 +553,14 @@ async function scrapeSingleQuery({
       if (results.length >= maxResults) break;
     }
 
-    // If Google Maps rendered compact text-only cards (no <img> in feed), fetch hero thumbnails
-    const missingThumbs = results.filter((r) => !r.imageUrl);
-    if (results.length <= 15 && missingThumbs.length > 0) {
-      for (let i = 0; i < missingThumbs.length; i += 4) {
-        const batch = missingThumbs.slice(i, i + 4);
+    // If Google Maps rendered compact text-only cards or omitted street address (e.g. hotels),
+    // fetch hero thumbnails & full address from the place page for small result sets
+    const needDetails = results.filter(
+      (r) => !r.imageUrl || !r.address || /^(Khách sạn \d sao|Cửa hàng|\+84)/i.test(r.address)
+    );
+    if (results.length <= 15 && needDetails.length > 0) {
+      for (let i = 0; i < needDetails.length; i += 4) {
+        const batch = needDetails.slice(i, i + 4);
         await Promise.all(
           batch.map(async (item) => {
             const thumbPage = await context.newPage();
@@ -546,23 +568,38 @@ async function scrapeSingleQuery({
               const cleanUrl = item.mapsUrl.split('?')[0] + '?hl=vi';
               await gotoWithRetry(thumbPage, cleanUrl, 15000);
               await thumbPage
-                .waitForSelector('button[jsaction*="heroHeaderImage"] img, button.aoRNLd img', {
-                  timeout: 6000,
-                })
+                .waitForSelector(
+                  'button[jsaction*="heroHeaderImage"] img, button.aoRNLd img, button[data-item-id="address"]',
+                  { timeout: 6000 }
+                )
                 .catch(() => {});
-              const heroSrc = await thumbPage.evaluate(() => {
-                return (
+              const extra = await thumbPage.evaluate(() => {
+                const heroSrc =
                   document.querySelector('button[jsaction*="heroHeaderImage"] img')?.getAttribute('src') ||
                   document.querySelector('button.aoRNLd img')?.getAttribute('src') ||
                   Array.from(document.querySelectorAll('img[src*="googleusercontent.com"]'))
                     .map((im) => im.getAttribute('src') || '')
                     .find((s) => !s.includes('/a/')) ||
-                  ''
-                );
+                  '';
+                const addr =
+                  document.querySelector('button[data-item-id="address"]')?.textContent?.trim() ||
+                  '';
+                const tel =
+                  document.querySelector('button[data-item-id^="phone:"]')?.textContent?.trim() ||
+                  '';
+                return { heroSrc, addr, tel };
               });
-              item.imageUrl = upgradePhotoUrl(heroSrc);
+              if (!item.imageUrl && extra.heroSrc) {
+                item.imageUrl = upgradePhotoUrl(extra.heroSrc);
+              }
+              if (extra.addr) {
+                item.address = extra.addr.replace(/[\uE000-\uF8FF]/g, '').trim();
+              }
+              if (!item.phone && extra.tel) {
+                item.phone = extra.tel.replace(/[\uE000-\uF8FF]/g, '').trim();
+              }
             } catch {
-              // Keep null if thumbnail fetch fails
+              // Keep existing values if fetch fails
             } finally {
               await thumbPage.close().catch(() => {});
             }
@@ -660,14 +697,18 @@ export async function scrapePlaceDetails(mapsUrl) {
       .catch(() => {});
 
     const details = await page.evaluate(() => {
-      const address =
-        document.querySelector('button[data-item-id="address"]')?.textContent?.trim() || '';
-      const phone =
-        document.querySelector('button[data-item-id^="phone:"]')?.textContent?.trim() || '';
+      const clean = (s) => (s || '').replace(/[\uE000-\uF8FF]/g, '').trim();
+      const address = clean(
+        document.querySelector('button[data-item-id="address"]')?.textContent
+      );
+      const phone = clean(
+        document.querySelector('button[data-item-id^="phone:"]')?.textContent
+      );
       const website =
         document.querySelector('a[data-item-id="authority"]')?.getAttribute('href') || '';
-      const hours =
-        document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label') || '';
+      const hours = clean(
+        document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label')
+      );
 
       const photoUrls = new Set();
       const imgs = Array.from(document.querySelectorAll('img'));
