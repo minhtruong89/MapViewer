@@ -11,9 +11,12 @@ import {
 } from './scraper.js';
 import {
   isValidCoordinates,
+  isValidCoordPoint,
   isValidGoogleMapsUrl,
+  isValidWaypoints,
   normalizeCategory,
 } from './validators.js';
+import { fetchDrivingDistances, fetchDrivingRoute } from './osrm.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -78,6 +81,102 @@ app.get('/api/geocode', async (req, res) => {
   } catch (err) {
     console.error('Geocode error:', err);
     res.status(500).json({ error: 'Không thể tìm tọa độ khu vực. Vui lòng thử lại.' });
+  }
+});
+
+/**
+ * Reverse-geocodes coordinates into a short Vietnamese location label via Nominatim.
+ */
+app.get('/api/reverse-geocode', async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  if (!isValidCoordinates(lat, lng)) {
+    return res.status(400).json({ error: 'Tọa độ không hợp lệ.' });
+  }
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=vi`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'AnalyzedMapApp/1.0 (local-research-tool)',
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Nominatim trả về lỗi HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const addr = data.address || {};
+    const displayName = String(data.display_name || '').trim();
+    const shortParts = [
+      addr.road || addr.suburb || addr.quarter || addr.village,
+      addr.city_district || addr.town || addr.city || addr.state,
+    ].filter(Boolean);
+
+    const shortName =
+      shortParts.length > 0
+        ? shortParts.slice(0, 2).join(', ')
+        : displayName
+            .split(',')
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .slice(0, 2)
+            .join(', ') || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+    res.json({ shortName, displayName });
+  } catch (err) {
+    console.error('Reverse geocode error:', err);
+    res.status(500).json({ error: 'Không thể lấy tên địa điểm từ tọa độ.' });
+  }
+});
+
+/**
+ * Calculates car driving distances & durations from an origin to a list of destinations.
+ */
+app.post('/api/driving-distances', async (req, res) => {
+  const { origin, destinations } = req.body || {};
+  if (
+    !isValidCoordPoint(origin) ||
+    !Array.isArray(destinations) ||
+    destinations.length < 1 ||
+    destinations.length > 200 ||
+    !destinations.every(
+      (d) => typeof d?.id === 'string' && d.id.length > 0 && isValidCoordPoint(d)
+    )
+  ) {
+    return res.status(400).json({ error: 'Dữ liệu tọa độ điểm đi / điểm đến không hợp lệ.' });
+  }
+
+  try {
+    const results = await fetchDrivingDistances(origin, destinations);
+    res.json({ profile: 'driving', results });
+  } catch (err) {
+    console.error('Driving distances error:', err);
+    res.status(502).json({
+      error: 'Không thể tính khoảng cách đường ô tô từ máy chủ định tuyến.',
+    });
+  }
+});
+
+/**
+ * Calculates a multi-stop car driving route via OSRM.
+ */
+app.post('/api/driving-route', async (req, res) => {
+  const { waypoints } = req.body || {};
+  if (!isValidWaypoints(waypoints, 2, 10)) {
+    return res.status(400).json({ error: 'Lộ trình cần từ 2 đến 10 điểm có tọa độ hợp lệ.' });
+  }
+
+  try {
+    const route = await fetchDrivingRoute(waypoints);
+    res.json({ profile: 'driving', ...route });
+  } catch (err) {
+    console.error('Driving route error:', err);
+    res.status(502).json({
+      error: 'Không thể tạo tuyến đường ô tô giữa các điểm đã chọn.',
+    });
   }
 });
 

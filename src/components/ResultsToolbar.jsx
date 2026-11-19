@@ -1,4 +1,4 @@
-import { Star, SlidersHorizontal, ArrowUpDown, Loader2 } from 'lucide-react';
+import { Star, SlidersHorizontal, ArrowUpDown, Loader2, Car } from 'lucide-react';
 
 export default function ResultsToolbar({
   stats,
@@ -15,6 +15,7 @@ export default function ResultsToolbar({
   sortBy,
   onSortByChange,
   bgProgress,
+  drivingStatus = 'idle',
 }) {
   return (
     <>
@@ -113,6 +114,7 @@ export default function ResultsToolbar({
             onChange={(e) => onSortByChange(e.target.value)}
             className="px-3 py-1.5 rounded-xl border border-blue-200 text-xs font-bold bg-blue-50 text-blue-800 focus:outline-none"
           >
+            <option value="trust_desc">Sắp xếp: Điểm uy tín (sao + review)</option>
             <option value="rating_desc">Sắp xếp: Số sao cao nhất</option>
             <option value="reviews_desc">Sắp xếp: Nhiều review nhất</option>
             <option value="distance_asc">Sắp xếp: Gần tâm nhất</option>
@@ -121,6 +123,20 @@ export default function ResultsToolbar({
           </select>
         </div>
       </div>
+
+      {drivingStatus === 'loading' && (
+        <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-700">
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+          <span>Đang tính khoảng cách đường ô tô từ tâm...</span>
+        </div>
+      )}
+
+      {drivingStatus === 'ready' && (
+        <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-50/80 border border-emerald-200/80 text-xs text-emerald-800">
+          <Car className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+          <span>Khoảng cách trên thẻ đang tính theo đường ô tô thực tế</span>
+        </div>
+      )}
 
       {bgProgress && (
         <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-50/80 border border-blue-200/70 text-xs text-blue-800">

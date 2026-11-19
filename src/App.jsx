@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, AlertCircle, Sparkles } from 'lucide-react';
+import { Loader2, AlertCircle, Sparkles, History } from 'lucide-react';
 import Header from './components/Header';
 import SearchSidebar from './components/SearchSidebar';
 import ResultsToolbar from './components/ResultsToolbar';
@@ -8,6 +8,8 @@ import PlaceModal from './components/PlaceModal';
 import SaveToMapModal from './components/SaveToMapModal';
 import SavedMapsView from './components/SavedMapsView';
 import { useSavedMaps } from './hooks/useSavedMaps';
+import { useSearchHistory } from './hooks/useSearchHistory';
+import { computeTrustScore } from './utils/geo';
 
 const CENTERS_STORAGE_KEY = 'analyzed_map_centers_v1';
 const LAST_CENTER_STORAGE_KEY = 'analyzed_map_last_center_v1';
@@ -71,6 +73,10 @@ export default function App() {
   const [customQuery, setCustomQuery] = useState('');
   const [maxResults, setMaxResults] = useState(50);
 
+  // GPS locate state
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsError, setGpsError] = useState('');
+
   // Scraping state
   const [places, setPlaces] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -78,7 +84,7 @@ export default function App() {
   const [hasSearched, setHasSearched] = useState(false);
 
   // View, filter & sort state
-  const [sortBy, setSortBy] = useState('rating_desc');
+  const [sortBy, setSortBy] = useState('trust_desc');
   const [filterType, setFilterType] = useState('all');
   const [minRating, setMinRating] = useState(0);
   const [minReviews, setMinReviews] = useState(0);
@@ -93,11 +99,13 @@ export default function App() {
   const [hasProfile, setHasProfile] = useState(false);
   const [supportsGuiLogin, setSupportsGuiLogin] = useState(false);
 
-  // Background thumbnail enrichment
+  // Background thumbnail enrichment & OSRM driving distances
   const [searchSeq, setSearchSeq] = useState(0);
   const [bgProgress, setBgProgress] = useState(null);
+  const [drivingStatus, setDrivingStatus] = useState('idle'); // 'idle' | 'loading' | 'ready' | 'fallback'
   const enrichedIdsRef = useRef(new Set());
   const bgAbortRef = useRef(null);
+  const drivingAbortRef = useRef(null);
 
   // Two main modes: 'search' | 'saved'
   const [activeView, setActiveView] = useState('search');
@@ -111,10 +119,22 @@ export default function App() {
     renameMap,
     removeItem,
     deleteMap,
+    updateItemMeta,
     updatePlaceInSavedMaps,
     exportMapsJson,
     importMapsJson,
   } = useSavedMaps();
+
+  const {
+    history: searchHistory,
+    saveSearchSnapshot,
+    updateSnapshotPlaces,
+    removeHistoryEntry,
+    clearHistory,
+  } = useSearchHistory();
+  const [activeHistoryId, setActiveHistoryId] = useState(null);
+  const activeHistoryIdRef = useRef(activeHistoryId);
+  activeHistoryIdRef.current = activeHistoryId;
 
   useEffect(() => {
     try {
@@ -147,6 +167,10 @@ export default function App() {
         setSupportsGuiLogin(Boolean(d?.supportsGuiLogin));
       })
       .catch(() => {});
+
+    return () => {
+      drivingAbortRef.current?.abort();
+    };
   }, []);
 
   const handleSetAndAddCenter = useCallback((newCenter) => {
@@ -166,6 +190,128 @@ export default function App() {
   const handleRemovePresetCenter = useCallback((nameToRemove) => {
     setPresetCenters((prev) => prev.filter((c) => c.name !== nameToRemove));
   }, []);
+
+  const handleLocateMe = useCallback(() => {
+    if (!navigator.geolocation) {
+      setGpsError('Trình duyệt không hỗ trợ định vị GPS.');
+      return;
+    }
+    if (!window.isSecureContext) {
+      setGpsError('Định vị GPS yêu cầu kết nối HTTPS hoặc localhost.');
+      return;
+    }
+
+    setGpsLoading(true);
+    setGpsError('');
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = Number(pos.coords.latitude.toFixed(6));
+        const lng = Number(pos.coords.longitude.toFixed(6));
+        setCenter({ name: 'Vị trí của tôi', lat, lng });
+        setGpsLoading(false);
+
+        try {
+          const res = await fetch(`/api/reverse-geocode?lat=${lat}&lng=${lng}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data?.shortName) {
+            setCenter((prev) =>
+              prev &&
+              Math.abs(prev.lat - lat) < 0.00001 &&
+              Math.abs(prev.lng - lng) < 0.00001
+                ? { ...prev, name: `Vị trí của tôi (${data.shortName})` }
+                : prev
+            );
+          }
+        } catch {
+          // Keep coordinate label when reverse geocoding fails
+        }
+      },
+      (err) => {
+        setGpsLoading(false);
+        switch (err.code) {
+          case 1:
+            setGpsError(
+              'Bạn đã từ chối quyền truy cập vị trí. Hãy cấp quyền định vị cho trình duyệt.'
+            );
+            break;
+          case 2:
+            setGpsError('Không thể xác định vị trí hiện tại.');
+            break;
+          case 3:
+            setGpsError('Hết thời gian chờ tín hiệu GPS. Vui lòng thử lại.');
+            break;
+          default:
+            setGpsError('Không thể lấy vị trí GPS.');
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    );
+  }, []);
+
+  const fetchSearchDrivingDistances = useCallback(
+    async (originCenter, placeList, historyId) => {
+      drivingAbortRef.current?.abort();
+      const destinations = (placeList || [])
+        .filter((p) => p.lat != null && p.lng != null)
+        .map((p) => ({ id: p.id, lat: p.lat, lng: p.lng }));
+
+      if (destinations.length === 0) {
+        setDrivingStatus('idle');
+        return;
+      }
+
+      const controller = new AbortController();
+      drivingAbortRef.current = controller;
+      setDrivingStatus('loading');
+
+      try {
+        const res = await fetch('/api/driving-distances', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            origin: { lat: originCenter.lat, lng: originCenter.lng },
+            destinations,
+          }),
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error('OSRM error');
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+
+        const map = data.results || {};
+        const hasAny = Object.keys(map).length > 0;
+
+        if (hasAny) {
+          const applyDriving = (list) =>
+            list.map((p) => {
+              const info = map[p.id];
+              return info
+                ? {
+                    ...p,
+                    drivingDistanceKm: info.distanceKm,
+                    drivingDurationMin: info.durationMin,
+                  }
+                : p;
+            });
+
+          setPlaces(applyDriving);
+          if (historyId) {
+            updateSnapshotPlaces(historyId, applyDriving);
+          }
+          setDrivingStatus('ready');
+        } else {
+          setDrivingStatus('fallback');
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          setDrivingStatus('fallback');
+        }
+      }
+    },
+    [updateSnapshotPlaces]
+  );
 
   const handlePlaceEnriched = useCallback(
     (placeId, data) => {
@@ -188,8 +334,11 @@ export default function App() {
       setPlaces((prev) => prev.map(patchItem));
       setSelectedPlace((prev) => (prev && prev.id === placeId ? patchItem(prev) : prev));
       updatePlaceInSavedMaps(placeId, data);
+      if (activeHistoryIdRef.current) {
+        updateSnapshotPlaces(activeHistoryIdRef.current, (prev) => prev.map(patchItem));
+      }
     },
-    [updatePlaceInSavedMaps]
+    [updatePlaceInSavedMaps, updateSnapshotPlaces]
   );
 
   async function handleOpenLogin() {
@@ -211,8 +360,10 @@ export default function App() {
 
   async function handleSearch() {
     bgAbortRef.current?.abort();
+    drivingAbortRef.current?.abort();
     enrichedIdsRef.current.clear();
     setBgProgress(null);
+    setDrivingStatus('idle');
     setLoading(true);
     setError('');
     setHasSearched(true);
@@ -237,14 +388,56 @@ export default function App() {
         throw new Error(data.error || 'Lỗi khi lấy dữ liệu từ Google Maps.');
       }
 
-      setPlaces(data.places || []);
+      const fetchedPlaces = data.places || [];
+      setPlaces(fetchedPlaces);
+      const snapId = saveSearchSnapshot({
+        center,
+        radiusKm,
+        category,
+        customQuery,
+        maxResults,
+        places: fetchedPlaces,
+      });
+      setActiveHistoryId(snapId);
       setSearchSeq((s) => s + 1);
+      fetchSearchDrivingDistances(center, fetchedPlaces, snapId);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
   }
+
+  const handleRestoreHistory = useCallback(
+    (entry) => {
+      if (!entry) return;
+      bgAbortRef.current?.abort();
+      drivingAbortRef.current?.abort();
+      enrichedIdsRef.current.clear();
+      setBgProgress(null);
+      setError('');
+
+      const restoredPlaces = entry.places || [];
+      setCenter(entry.center);
+      setRadiusKm(entry.radiusKm);
+      setCategory(entry.category);
+      setCustomQuery(entry.customQuery || '');
+      setMaxResults(entry.maxResults || 50);
+      setPlaces(restoredPlaces);
+      setHasSearched(true);
+      setSelectedPlace(null);
+      setActiveHistoryId(entry.id);
+      setSearchSeq((s) => s + 1);
+
+      if (restoredPlaces.some((p) => p.drivingDistanceKm != null)) {
+        setDrivingStatus('ready');
+      } else {
+        setDrivingStatus('idle');
+        fetchSearchDrivingDistances(entry.center, restoredPlaces, entry.id);
+      }
+    },
+    [fetchSearchDrivingDistances]
+  );
 
   // Filtered & sorted results
   const filteredPlaces = useMemo(() => {
@@ -267,6 +460,12 @@ export default function App() {
 
     return [...filtered].sort((a, b) => {
       switch (sortBy) {
+        case 'trust_desc':
+          return (
+            computeTrustScore(b.rating, b.reviewCount) -
+              computeTrustScore(a.rating, a.reviewCount) ||
+            b.reviewCount - a.reviewCount
+          );
         case 'rating_desc':
           return b.rating - a.rating || b.reviewCount - a.reviewCount;
         case 'rating_asc':
@@ -276,7 +475,10 @@ export default function App() {
         case 'reviews_asc':
           return a.reviewCount - b.reviewCount || a.rating - b.rating;
         case 'distance_asc':
-          return (a.distanceKm ?? 999) - (b.distanceKm ?? 999);
+          return (
+            (a.drivingDistanceKm ?? a.distanceKm ?? 999) -
+            (b.drivingDistanceKm ?? b.distanceKm ?? 999)
+          );
         default:
           return 0;
       }
@@ -324,19 +526,23 @@ export default function App() {
             const firstPhoto = data.photos?.[0] || null;
 
             if (firstPhoto || data.address || data.phone) {
-              setPlaces((prev) =>
-                prev.map((p) =>
-                  p.id === item.id
-                    ? {
-                        ...p,
-                        imageUrl: p.imageUrl || firstPhoto,
-                        address: data.address || p.address,
-                        phone: p.phone || data.phone || '',
-                      }
-                    : p
-                )
-              );
+              const patchItem = (p) =>
+                p.id === item.id
+                  ? {
+                      ...p,
+                      imageUrl: p.imageUrl || firstPhoto,
+                      address: data.address || p.address,
+                      phone: p.phone || data.phone || '',
+                    }
+                  : p;
+
+              setPlaces((prev) => prev.map(patchItem));
               updatePlaceInSavedMaps(item.id, data);
+              if (activeHistoryIdRef.current) {
+                updateSnapshotPlaces(activeHistoryIdRef.current, (prev) =>
+                  prev.map(patchItem)
+                );
+              }
             }
           } else {
             enrichedIdsRef.current.add(item.id);
@@ -372,6 +578,7 @@ export default function App() {
     minReviews,
     debouncedKeyword,
     updatePlaceInSavedMaps,
+    updateSnapshotPlaces,
   ]);
 
   // Summary metrics
@@ -419,6 +626,7 @@ export default function App() {
           onDeleteMap={deleteMap}
           onRenameMap={renameMap}
           onRemoveItem={removeItem}
+          onUpdateItemMeta={updateItemMeta}
           onOpenDetails={(p) => setModalPlace(p)}
           onSwitchToSearch={() => setActiveView('search')}
           onExportMaps={exportMapsJson}
@@ -432,6 +640,9 @@ export default function App() {
             onSelectCenter={setCenter}
             onRemovePresetCenter={handleRemovePresetCenter}
             onMapCenterChange={setCenter}
+            gpsLoading={gpsLoading}
+            gpsError={gpsError}
+            onLocateMe={handleLocateMe}
             radiusKm={radiusKm}
             onRadiusChange={setRadiusKm}
             category={category}
@@ -445,6 +656,17 @@ export default function App() {
             places={filteredPlaces}
             selectedPlace={selectedPlace}
             onSelectPlace={setSelectedPlace}
+            searchHistory={searchHistory}
+            activeHistoryId={activeHistoryId}
+            onRestoreHistory={handleRestoreHistory}
+            onRemoveHistory={(id) => {
+              removeHistoryEntry(id);
+              if (id === activeHistoryId) setActiveHistoryId(null);
+            }}
+            onClearHistory={() => {
+              clearHistory();
+              setActiveHistoryId(null);
+            }}
           />
 
           <section className="lg:col-span-8 xl:col-span-9 space-y-4">
@@ -473,6 +695,7 @@ export default function App() {
               sortBy={sortBy}
               onSortByChange={setSortBy}
               bgProgress={bgProgress}
+              drivingStatus={drivingStatus}
             />
 
             {/* Results Grid */}
@@ -523,6 +746,18 @@ export default function App() {
                     ? 'Hãy thử tăng bán kính tìm kiếm, nới lỏng bộ lọc số sao / lượt review hoặc chọn tâm khác.'
                     : 'Chọn điểm trung tâm (vd: Hồ Xuân Hương), điều chỉnh bán kính (km) và nhấn "Quét dữ liệu Google Maps" để bắt đầu.'}
                 </p>
+
+                {!hasSearched && searchHistory.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleRestoreHistory(searchHistory[0])}
+                    className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    <History className="w-4 h-4" />
+                    Mở lại lần quét gần nhất: {searchHistory[0].center.name} (
+                    {searchHistory[0].places.length} điểm)
+                  </button>
+                )}
               </div>
             )}
           </section>

@@ -6,8 +6,31 @@ import {
   Utensils,
   Loader2,
   X,
+  LocateFixed,
+  History,
+  Trash2,
 } from 'lucide-react';
 import InteractiveMap from './InteractiveMap';
+
+const CATEGORY_LABELS = {
+  all: 'Tất cả',
+  lodging: 'Nơi ở',
+  restaurant: 'Ăn uống',
+};
+
+function formatHistoryTime(iso) {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    return `${hh}:${mm} ${dd}/${mo}`;
+  } catch {
+    return '';
+  }
+}
 
 export default function SearchSidebar({
   center,
@@ -15,6 +38,9 @@ export default function SearchSidebar({
   onSelectCenter,
   onRemovePresetCenter,
   onMapCenterChange,
+  gpsLoading = false,
+  gpsError = '',
+  onLocateMe,
   radiusKm,
   onRadiusChange,
   category,
@@ -28,15 +54,38 @@ export default function SearchSidebar({
   places,
   selectedPlace,
   onSelectPlace,
+  searchHistory = [],
+  activeHistoryId = null,
+  onRestoreHistory,
+  onRemoveHistory,
+  onClearHistory,
 }) {
   return (
     <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-5">
         {/* Selected Center */}
         <div>
-          <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-            1. Điểm trung tâm
-          </label>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              1. Điểm trung tâm
+            </label>
+            {onLocateMe && (
+              <button
+                type="button"
+                onClick={onLocateMe}
+                disabled={gpsLoading}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-[11px] font-semibold transition-colors disabled:opacity-60 cursor-pointer"
+                title="Dùng GPS thiết bị đặt vị trí hiện tại làm tâm"
+              >
+                {gpsLoading ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <LocateFixed className="w-3 h-3" />
+                )}
+                Vị trí của tôi
+              </button>
+            )}
+          </div>
           <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200/70">
             <div className="font-semibold text-sm text-slate-900 flex items-center gap-1.5">
               <MapPin className="w-4 h-4 text-rose-600 shrink-0" />
@@ -46,6 +95,10 @@ export default function SearchSidebar({
               {center.lat.toFixed(5)}, {center.lng.toFixed(5)} · Nhấp bản đồ để đổi
             </div>
           </div>
+
+          {gpsError && (
+            <p className="text-[11px] text-rose-600 mt-1.5 leading-snug">{gpsError}</p>
+          )}
 
           {/* Quick Presets (with remove button) */}
           {presetCenters.length > 0 && (
@@ -217,6 +270,77 @@ export default function SearchSidebar({
           )}
         </button>
       </div>
+
+      {/* Recent Search History */}
+      {searchHistory.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+              <History className="w-3.5 h-3.5 text-slate-400" />
+              Lịch sử gần đây ({searchHistory.length})
+            </h3>
+            {onClearHistory && (
+              <button
+                type="button"
+                onClick={onClearHistory}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-400 hover:text-rose-600 cursor-pointer"
+                title="Xóa toàn bộ lịch sử quét"
+              >
+                <Trash2 className="w-3 h-3" />
+                Xóa hết
+              </button>
+            )}
+          </div>
+
+          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-0.5">
+            {searchHistory.map((entry) => {
+              const isActive = entry.id === activeHistoryId;
+              const catLabel = CATEGORY_LABELS[entry.category] || 'Tất cả';
+              return (
+                <div
+                  key={entry.id}
+                  onClick={() => onRestoreHistory?.(entry)}
+                  className={`group flex items-start justify-between gap-2 p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                    isActive
+                      ? 'bg-blue-50 border-blue-400'
+                      : 'bg-slate-50/70 border-slate-200/80 hover:bg-slate-100'
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-slate-800 truncate">
+                        {entry.center.name}
+                      </span>
+                      {entry.customQuery && (
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-semibold truncate max-w-[90px]">
+                          {entry.customQuery}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                      {entry.radiusKm}km · {catLabel} · {entry.places.length} điểm ·{' '}
+                      {formatHistoryTime(entry.timestamp)}
+                    </p>
+                  </div>
+                  {onRemoveHistory && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemoveHistory(entry.id);
+                      }}
+                      className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer shrink-0"
+                      title="Xóa mục này"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Interactive Map on Sidebar (or Mobile) */}
       <div className="h-[340px] lg:h-[380px]">

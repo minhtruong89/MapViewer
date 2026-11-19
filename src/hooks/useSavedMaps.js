@@ -26,6 +26,8 @@ function sanitizePlaceItem(item) {
     lat: typeof item.lat === 'number' && Number.isFinite(item.lat) ? item.lat : null,
     lng: typeof item.lng === 'number' && Number.isFinite(item.lng) ? item.lng : null,
     mapsUrl: String(item.mapsUrl || ''),
+    note: String(item.note || '').slice(0, 300),
+    visited: Boolean(item.visited),
   };
 }
 
@@ -130,6 +132,26 @@ export function useSavedMaps() {
 
   const deleteMap = useCallback((mapId) => {
     setSavedMaps((prev) => prev.filter((m) => m.id !== mapId));
+  }, []);
+
+  const updateItemMeta = useCallback((mapId, placeId, patch) => {
+    if (!patch || typeof patch !== 'object') return;
+    setSavedMaps((prev) =>
+      prev.map((m) => {
+        if (m.id !== mapId) return m;
+        return {
+          ...m,
+          items: m.items.map((it) => {
+            if (it.id !== placeId) return it;
+            return {
+              ...it,
+              ...('note' in patch ? { note: String(patch.note || '').slice(0, 300) } : {}),
+              ...('visited' in patch ? { visited: Boolean(patch.visited) } : {}),
+            };
+          }),
+        };
+      })
+    );
   }, []);
 
   const updatePlaceInSavedMaps = useCallback((placeId, details) => {
@@ -265,6 +287,7 @@ export function useSavedMaps() {
     renameMap,
     removeItem,
     deleteMap,
+    updateItemMeta,
     updatePlaceInSavedMaps,
     exportMapsJson,
     importMapsJson,

@@ -39,9 +39,11 @@ function createColoredPin(color, label) {
   });
 }
 
-function createLabeledPin(isLodging, name, rating) {
+function createLabeledPin(isLodging, name, rating, stopNumber = null) {
   const bg = isLodging ? '#4338ca' : '#e11d48';
-  const shortName = escapeHtml(name.length > 26 ? name.slice(0, 25) + '…' : name);
+  const baseName = name.length > 26 ? name.slice(0, 25) + '…' : name;
+  const labelText = stopNumber != null ? `#${stopNumber} · ${baseName}` : baseName;
+  const shortName = escapeHtml(labelText);
   const ratingLabel = rating ? rating.toFixed(1) : '?';
 
   return L.divIcon({
@@ -105,12 +107,15 @@ export default function InteractiveMap({
   onCenterChange,
   onSelectPlace,
   showSearchCenter = true,
+  routeLine = null,
+  routeStopNumbers = null,
 }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const centerMarkerRef = useRef(null);
   const circleRef = useRef(null);
   const placesLayerRef = useRef(null);
+  const routeLayerRef = useRef(null);
   const onCenterChangeRef = useRef(onCenterChange);
   const onSelectPlaceRef = useRef(onSelectPlace);
   const lastFittedCoordsKeyRef = useRef('');
@@ -139,6 +144,7 @@ export default function InteractiveMap({
       maxZoom: 19,
     }).addTo(map);
 
+    routeLayerRef.current = L.layerGroup().addTo(map);
     placesLayerRef.current = L.layerGroup().addTo(map);
 
     map.on('click', (e) => {
@@ -159,6 +165,7 @@ export default function InteractiveMap({
       centerMarkerRef.current = null;
       circleRef.current = null;
       placesLayerRef.current = null;
+      routeLayerRef.current = null;
       lastFittedCoordsKeyRef.current = '';
     };
   }, []);
@@ -232,10 +239,11 @@ export default function InteractiveMap({
       const safePlaceName = escapeHtml(place.name);
       const reviewLabel = (place.reviewCount ?? 0).toLocaleString('vi-VN');
 
+      const stopNumber = routeStopNumbers?.get?.(place.id) ?? null;
       const marker = L.marker([place.lat, place.lng], {
         icon: showSearchCenter
           ? createColoredPin(color, ratingLabel)
-          : createLabeledPin(isLodging, place.name, place.rating),
+          : createLabeledPin(isLodging, place.name, place.rating, stopNumber),
       });
 
       const popupHtml = `
@@ -268,7 +276,22 @@ export default function InteractiveMap({
     } else {
       lastFittedCoordsKeyRef.current = '';
     }
-  }, [places, showSearchCenter]);
+  }, [places, showSearchCenter, routeStopNumbers]);
+
+  // Render driving route polyline (Saved maps multi-stop planner)
+  useEffect(() => {
+    const layer = routeLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (Array.isArray(routeLine) && routeLine.length >= 2) {
+      L.polyline(routeLine, {
+        color: '#2563eb',
+        weight: 4,
+        opacity: 0.85,
+        lineJoin: 'round',
+      }).addTo(layer);
+    }
+  }, [routeLine]);
 
   // Pan to selected place
   useEffect(() => {

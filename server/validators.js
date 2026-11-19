@@ -41,3 +41,22 @@ export function isValidGoogleMapsUrl(rawUrl) {
 export function normalizeCategory(category) {
   return VALID_CATEGORIES.has(category) ? category : 'all';
 }
+
+/**
+ * Validates an object containing finite { lat, lng } coordinates.
+ */
+export function isValidCoordPoint(pt) {
+  return Boolean(pt && typeof pt === 'object' && isValidCoordinates(pt.lat, pt.lng));
+}
+
+/**
+ * Validates an array of coordinate waypoints within length bounds.
+ */
+export function isValidWaypoints(points, minLen = 2, maxLen = 50) {
+  return (
+    Array.isArray(points) &&
+    points.length >= minLen &&
+    points.length <= maxLen &&
+    points.every(isValidCoordPoint)
+  );
+}
