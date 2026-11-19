@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MapPin,
   Search,
@@ -14,6 +14,7 @@ import {
   Sparkles,
   UserCheck,
   Map as MapIcon,
+  X,
 } from 'lucide-react';
 import InteractiveMap from './components/InteractiveMap';
 import PlaceCard from './components/PlaceCard';
@@ -22,17 +23,46 @@ import SaveToMapModal from './components/SaveToMapModal';
 import SavedMapsView from './components/SavedMapsView';
 
 const SAVED_MAPS_STORAGE_KEY = 'analyzed_map_saved_v1';
+const CENTERS_STORAGE_KEY = 'analyzed_map_centers_v1';
+const LAST_CENTER_STORAGE_KEY = 'analyzed_map_last_center_v1';
 
-const PRESET_CENTERS = [
+const DEFAULT_PRESET_CENTERS = [
   { name: 'Hồ Xuân Hương, Đà Lạt', lat: 11.940419, lng: 108.442254 },
   { name: 'Chợ Đà Lạt', lat: 11.942278, lng: 108.437539 },
   { name: 'Hồ Tuyền Lâm, Đà Lạt', lat: 11.9012, lng: 108.4325 },
   { name: 'Hoàng Hoa Thám, HCM', lat: 10.80604, lng: 106.69057 },
 ];
 
+const FALLBACK_DEFAULT_CENTER = DEFAULT_PRESET_CENTERS[1]; // Chợ Đà Lạt
+
 export default function App() {
   // Search parameters
-  const [center, setCenter] = useState(PRESET_CENTERS[0]);
+  const [presetCenters, setPresetCenters] = useState(() => {
+    try {
+      const raw = localStorage.getItem(CENTERS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // Fallback to defaults
+    }
+    return DEFAULT_PRESET_CENTERS;
+  });
+  const [center, setCenter] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LAST_CENTER_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.lat === 'number' && typeof parsed?.lng === 'number' && parsed?.name) {
+          return parsed;
+        }
+      }
+    } catch {
+      // Fallback to Chợ Đà Lạt
+    }
+    return FALLBACK_DEFAULT_CENTER;
+  });
   const [radiusKm, setRadiusKm] = useState(5);
   const [category, setCategory] = useState('all'); // 'all' | 'lodging' | 'restaurant'
   const [customQuery, setCustomQuery] = useState('');
@@ -63,6 +93,10 @@ export default function App() {
   const [loginNotice, setLoginNotice] = useState('');
   const [hasProfile, setHasProfile] = useState(false);
   const [supportsGuiLogin, setSupportsGuiLogin] = useState(false);
+  const [searchSeq, setSearchSeq] = useState(0);
+  const [bgProgress, setBgProgress] = useState(null);
+  const enrichedIdsRef = useRef(new Set());
+  const bgAbortRef = useRef(null);
 
   // Two main modes: 'search' | 'saved'
   const [activeView, setActiveView] = useState('search');
@@ -83,6 +117,40 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [savedMaps]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CENTERS_STORAGE_KEY, JSON.stringify(presetCenters));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [presetCenters]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAST_CENTER_STORAGE_KEY, JSON.stringify(center));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [center]);
+
+  function handleSetAndAddCenter(newCenter) {
+    setCenter(newCenter);
+    setPresetCenters((prev) => {
+      const exists = prev.some(
+        (c) =>
+          c.name.toLowerCase() === newCenter.name.toLowerCase() ||
+          (Math.abs(c.lat - newCenter.lat) < 0.0001 &&
+            Math.abs(c.lng - newCenter.lng) < 0.0001)
+      );
+      if (exists) return prev;
+      return [...prev, newCenter];
+    });
+  }
+
+  function handleRemovePresetCenter(nameToRemove) {
+    setPresetCenters((prev) => prev.filter((c) => c.name !== nameToRemove));
+  }
 
   const savedPlaceIds = useMemo(() => {
     const ids = new Set();
@@ -179,6 +247,9 @@ export default function App() {
   }
 
   async function handleSearch() {
+    bgAbortRef.current?.abort();
+    enrichedIdsRef.current.clear();
+    setBgProgress(null);
     setLoading(true);
     setError('');
     setHasSearched(true);
@@ -204,6 +275,7 @@ export default function App() {
       }
 
       setPlaces(data.places || []);
+      setSearchSeq((s) => s + 1);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -247,6 +319,80 @@ export default function App() {
       }
     });
   }, [places, filterType, minRating, minReviews, keywordFilter, sortBy]);
+
+  // Background queue: fetch missing thumbnails (and full address/phone) sequentially
+  // Restarts in the new display order when sorted/filtered, and cancels on new search.
+  useEffect(() => {
+    if (searchSeq === 0 || loading) return;
+
+    const queue = filteredPlaces.filter(
+      (p) => !p.imageUrl && !enrichedIdsRef.current.has(p.id)
+    );
+    if (queue.length === 0) {
+      setBgProgress(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    bgAbortRef.current = controller;
+    let cancelled = false;
+
+    async function runQueue() {
+      setBgProgress({ done: 0, total: queue.length });
+
+      for (let i = 0; i < queue.length; i++) {
+        if (cancelled || controller.signal.aborted) break;
+        const item = queue[i];
+
+        try {
+          const res = await fetch(
+            `/api/place-details?url=${encodeURIComponent(item.mapsUrl)}`,
+            { signal: controller.signal }
+          );
+          if (res.ok) {
+            const data = await res.json();
+            enrichedIdsRef.current.add(item.id);
+            const firstPhoto = data.photos?.[0] || null;
+
+            if (firstPhoto || data.address || data.phone) {
+              setPlaces((prev) =>
+                prev.map((p) =>
+                  p.id === item.id
+                    ? {
+                        ...p,
+                        imageUrl: p.imageUrl || firstPhoto,
+                        address: data.address || p.address,
+                        phone: p.phone || data.phone || '',
+                      }
+                    : p
+                )
+              );
+            }
+          } else {
+            enrichedIdsRef.current.add(item.id);
+          }
+        } catch (err) {
+          if (err.name === 'AbortError') break;
+          enrichedIdsRef.current.add(item.id);
+        }
+
+        if (!cancelled) {
+          setBgProgress({ done: i + 1, total: queue.length });
+        }
+      }
+
+      if (!cancelled) {
+        setBgProgress(null);
+      }
+    }
+
+    runQueue();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [searchSeq, loading, sortBy, filterType, minRating, minReviews, keywordFilter]);
 
   // Summary metrics
   const stats = useMemo(() => {
@@ -432,23 +578,48 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Quick Presets */}
-              <div className="flex flex-wrap gap-1.5 mt-2.5">
-                {PRESET_CENTERS.map((preset) => (
-                  <button
-                    key={preset.name}
-                    type="button"
-                    onClick={() => setCenter(preset)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                      center.name === preset.name
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                    }`}
-                  >
-                    {preset.name.split(',')[0]}
-                  </button>
-                ))}
-              </div>
+              {/* Quick Presets (with remove button) */}
+              {presetCenters.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2.5">
+                  {presetCenters.map((preset) => {
+                    const isActive = center.name === preset.name;
+                    return (
+                      <div
+                        key={preset.name}
+                        className={`inline-flex items-center rounded-lg text-xs font-medium transition-colors ${
+                          isActive
+                            ? 'bg-slate-900 text-white'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setCenter(preset)}
+                          className="pl-2.5 pr-1.5 py-1 cursor-pointer truncate max-w-[170px]"
+                          title={preset.name}
+                        >
+                          {preset.name.split(',')[0]}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRemovePresetCenter(preset.name);
+                          }}
+                          className={`pr-1.5 pl-0.5 py-1 rounded-r-lg transition-colors cursor-pointer ${
+                            isActive
+                              ? 'text-slate-300 hover:text-white'
+                              : 'text-slate-400 hover:text-rose-600'
+                          }`}
+                          title="Xóa điểm trung tâm này"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Radius */}
@@ -703,6 +874,18 @@ export default function App() {
             </div>
           </div>
 
+          {bgProgress && (
+            <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-50/80 border border-blue-200/70 text-xs text-blue-800">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+              <span>
+                Đang tải ngầm ảnh đại diện cho các thẻ còn thiếu:{' '}
+                <strong>
+                  {bgProgress.done}/{bgProgress.total}
+                </strong>
+              </span>
+            </div>
+          )}
+
           {/* Results Grid */}
           {loading ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-16 flex flex-col items-center justify-center text-center">
@@ -726,6 +909,13 @@ export default function App() {
                   onSelect={(p) => setSelectedPlace(p)}
                   onOpenDetails={(p) => setModalPlace(p)}
                   onSave={(p) => setSaveTargetPlace(p)}
+                  onSetCenter={(p) =>
+                    handleSetAndAddCenter({
+                      name: p.name,
+                      lat: p.lat,
+                      lng: p.lng,
+                    })
+                  }
                 />
               ))}
             </div>

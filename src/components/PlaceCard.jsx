@@ -9,6 +9,7 @@ import {
   Bookmark,
   Trash2,
   Phone,
+  Crosshair,
 } from 'lucide-react';
 
 export default function PlaceCard({
@@ -19,6 +20,7 @@ export default function PlaceCard({
   onOpenDetails,
   onSave,
   onRemove,
+  onSetCenter,
 }) {
   const isLodging = place.type === 'lodging';
 
@@ -120,18 +122,33 @@ export default function PlaceCard({
         )}
 
         {/* Actions */}
-        <div className="mt-auto pt-3 border-t border-slate-100 flex items-center gap-2">
+        <div className="mt-auto pt-3 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               onOpenDetails(place);
             }}
-            className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors cursor-pointer"
+            className="flex-1 min-w-[76px] inline-flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors cursor-pointer"
           >
-            <ImageIcon className="w-3.5 h-3.5" />
+            <ImageIcon className="w-3.5 h-3.5 shrink-0" />
             Chi tiết
           </button>
+
+          {onSetCenter && place.lat != null && place.lng != null && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSetCenter(place);
+              }}
+              className="inline-flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition-colors cursor-pointer"
+              title="Đặt địa điểm này làm tâm tìm kiếm"
+            >
+              <Crosshair className="w-3.5 h-3.5 shrink-0" />
+              Đặt tâm
+            </button>
+          )}
 
           {onSave && (
             <button
@@ -140,14 +157,14 @@ export default function PlaceCard({
                 e.stopPropagation();
                 onSave(place);
               }}
-              className={`inline-flex items-center justify-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+              className={`inline-flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
                 isSaved
                   ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
                   : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700'
               }`}
               title="Lưu vào Map"
             >
-              <Bookmark className={`w-3.5 h-3.5 ${isSaved ? 'fill-emerald-600' : ''}`} />
+              <Bookmark className={`w-3.5 h-3.5 shrink-0 ${isSaved ? 'fill-emerald-600' : ''}`} />
               {isSaved ? 'Đã lưu' : 'Lưu'}
             </button>
           )}
@@ -171,10 +188,10 @@ export default function PlaceCard({
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center justify-center gap-1 px-3 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition-colors"
+            className="inline-flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition-colors"
             title="Mở trên Google Maps"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="w-3.5 h-3.5 shrink-0" />
             Maps
           </a>
         </div>
