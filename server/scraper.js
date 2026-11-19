@@ -4,9 +4,85 @@ import fs from 'fs';
 import path from 'path';
 
 const PROFILE_DIR = path.resolve('.browser-profile');
+const IDLE_CLOSE_MS = 7 * 60 * 1000;
+const DETAILS_CACHE_TTL_MS = 20 * 60 * 1000;
+const DETAILS_CACHE_MAX = 200;
 
 let contextInstance = null;
+let contextPromise = null;
 let loginContext = null;
+let activeOps = 0;
+let idleTimer = null;
+
+const DETAILS_CACHE = new Map();
+const INFLIGHT_DETAILS = new Map();
+
+/**
+ * Creates a lightweight async concurrency limiter (semaphore).
+ */
+function createLimiter(maxConcurrent) {
+  let running = 0;
+  const queue = [];
+
+  function next() {
+    if (running >= maxConcurrent || queue.length === 0) return;
+    running++;
+    const { fn, resolve, reject } = queue.shift();
+    Promise.resolve()
+      .then(fn)
+      .then(resolve, reject)
+      .finally(() => {
+        running--;
+        next();
+      });
+  }
+
+  return (fn) =>
+    new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      next();
+    });
+}
+
+const searchLimiter = createLimiter(2);
+const detailsLimiter = createLimiter(2);
+
+function clearIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+function scheduleIdleClose() {
+  clearIdleTimer();
+  if (activeOps === 0 && contextInstance && !loginContext) {
+    idleTimer = setTimeout(async () => {
+      if (activeOps === 0 && contextInstance && !loginContext) {
+        const ctx = contextInstance;
+        contextInstance = null;
+        await ctx.close().catch(() => {});
+      }
+    }, IDLE_CLOSE_MS);
+    idleTimer.unref?.();
+  }
+}
+
+/**
+ * Tracks active browser work and closes idle Chromium instances to save memory.
+ */
+async function withBrowserActivity(fn) {
+  activeOps++;
+  clearIdleTimer();
+  try {
+    return await fn();
+  } finally {
+    activeOps = Math.max(0, activeOps - 1);
+    if (activeOps === 0) {
+      scheduleIdleClose();
+    }
+  }
+}
 
 /**
  * Launches a persistent browser context with the given headless mode.
@@ -26,6 +102,7 @@ async function launchPersistent(headless) {
       '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      ...(headless ? ['--disable-gpu', '--disable-extensions'] : []),
     ],
   };
 
@@ -44,7 +121,7 @@ async function launchPersistent(headless) {
 }
 
 /**
- * Lazily launches and reuses a persistent headless Chromium context.
+ * Lazily launches and reuses a persistent headless Chromium context safely across concurrent callers.
  */
 async function getContext() {
   if (loginContext) {
@@ -63,11 +140,23 @@ async function getContext() {
     }
   }
 
-  contextInstance = await launchPersistent(true);
-  contextInstance.on('close', () => {
-    contextInstance = null;
-  });
-  return contextInstance;
+  if (!contextPromise) {
+    contextPromise = launchPersistent(true)
+      .then((ctx) => {
+        contextInstance = ctx;
+        ctx.on('close', () => {
+          if (contextInstance === ctx) {
+            contextInstance = null;
+          }
+        });
+        return ctx;
+      })
+      .finally(() => {
+        contextPromise = null;
+      });
+  }
+
+  return await contextPromise;
 }
 
 /**
@@ -81,6 +170,11 @@ export async function openLoginBrowser() {
   }
   if (loginContext) {
     return { ok: true, alreadyOpen: true };
+  }
+
+  clearIdleTimer();
+  if (contextPromise) {
+    await contextPromise.catch(() => {});
   }
 
   // Close headless context first because a persistent profile allows one instance at a time
@@ -118,6 +212,10 @@ export function getAuthStatus() {
  * Closes the shared browser context gracefully.
  */
 export async function closeBrowser() {
+  clearIdleTimer();
+  if (contextPromise) {
+    await contextPromise.catch(() => {});
+  }
   if (loginContext) {
     await loginContext.close().catch(() => {});
     loginContext = null;
@@ -559,8 +657,8 @@ async function scrapeSingleQuery({
       (r) => !r.imageUrl || !r.address || /^(Khách sạn \d sao|Cửa hàng|\+84)/i.test(r.address)
     );
     if (results.length <= 15 && needDetails.length > 0) {
-      for (let i = 0; i < needDetails.length; i += 4) {
-        const batch = needDetails.slice(i, i + 4);
+      for (let i = 0; i < needDetails.length; i += 2) {
+        const batch = needDetails.slice(i, i + 2);
         await Promise.all(
           batch.map(async (item) => {
             const thumbPage = await context.newPage();
@@ -625,120 +723,172 @@ export async function scrapeGoogleMaps({
   customQuery = '',
   maxResults = 30,
 }) {
-  const tasks = [];
+  return searchLimiter(() =>
+    withBrowserActivity(async () => {
+      const tasks = [];
 
-  if (customQuery && customQuery.trim()) {
-    const inferredType = category === 'all' ? 'auto' : category;
-    tasks.push({
-      searchTerm: customQuery.trim(),
-      type: inferredType,
-      limit: maxResults,
-    });
-  } else {
-    if (category === 'lodging' || category === 'all') {
-      tasks.push({
-        searchTerm: 'khách sạn homestay nơi ở',
-        type: 'lodging',
-        limit: category === 'all' ? Math.ceil(maxResults / 2) : maxResults,
-      });
-    }
-    if (category === 'restaurant' || category === 'all') {
-      tasks.push({
-        searchTerm: 'quán ăn nhà hàng',
-        type: 'restaurant',
-        limit: category === 'all' ? Math.ceil(maxResults / 2) : maxResults,
-      });
-    }
-  }
-
-  const taskResults = await Promise.all(
-    tasks.map((task) =>
-      scrapeSingleQuery({
-        centerLat: lat,
-        centerLng: lng,
-        radiusKm,
-        searchTerm: task.searchTerm,
-        type: task.type,
-        maxResults: task.limit,
-      })
-    )
-  );
-
-  const allResults = [];
-  const seenUrls = new Set();
-
-  for (const items of taskResults) {
-    for (const item of items) {
-      if (!seenUrls.has(item.mapsUrl)) {
-        seenUrls.add(item.mapsUrl);
-        allResults.push(item);
+      if (customQuery && customQuery.trim()) {
+        const inferredType = category === 'all' ? 'auto' : category;
+        tasks.push({
+          searchTerm: customQuery.trim(),
+          type: inferredType,
+          limit: maxResults,
+        });
+      } else {
+        if (category === 'lodging' || category === 'all') {
+          tasks.push({
+            searchTerm: 'khách sạn homestay nơi ở',
+            type: 'lodging',
+            limit: category === 'all' ? Math.ceil(maxResults / 2) : maxResults,
+          });
+        }
+        if (category === 'restaurant' || category === 'all') {
+          tasks.push({
+            searchTerm: 'quán ăn nhà hàng',
+            type: 'restaurant',
+            limit: category === 'all' ? Math.ceil(maxResults / 2) : maxResults,
+          });
+        }
       }
-    }
-  }
 
-  return allResults;
+      const taskResults = await Promise.all(
+        tasks.map((task) =>
+          scrapeSingleQuery({
+            centerLat: lat,
+            centerLng: lng,
+            radiusKm,
+            searchTerm: task.searchTerm,
+            type: task.type,
+            maxResults: task.limit,
+          })
+        )
+      );
+
+      const allResults = [];
+      const seenUrls = new Set();
+
+      for (const items of taskResults) {
+        for (const item of items) {
+          if (!seenUrls.has(item.mapsUrl)) {
+            seenUrls.add(item.mapsUrl);
+            allResults.push(item);
+          }
+        }
+      }
+
+      return allResults;
+    })
+  );
 }
 
 /**
  * Fetches additional photos & metadata for a specific Google Maps place URL.
  */
 export async function scrapePlaceDetails(mapsUrl) {
-  const context = await getContext();
-  const page = await context.newPage();
+  const cleanUrl = mapsUrl.split('?')[0] + '?hl=vi';
 
-  try {
-    const cleanUrl = mapsUrl.split('?')[0] + '?hl=vi';
-    await gotoWithRetry(page, cleanUrl, 30000);
-    await page.waitForTimeout(2000);
-    await checkPageAndConsent(page);
+  const cached = DETAILS_CACHE.get(cleanUrl);
+  if (cached) {
+    if (Date.now() < cached.expiresAt) {
+      // Refresh LRU insertion order
+      DETAILS_CACHE.delete(cleanUrl);
+      DETAILS_CACHE.set(cleanUrl, cached);
+      return cached.data;
+    }
+    DETAILS_CACHE.delete(cleanUrl);
+  }
 
-    await page
-      .waitForSelector('h1.DUwDvf, button[jsaction*="photo"]', { timeout: 15000 })
-      .catch(() => {});
+  if (INFLIGHT_DETAILS.has(cleanUrl)) {
+    return INFLIGHT_DETAILS.get(cleanUrl);
+  }
 
-    const details = await page.evaluate(() => {
-      const clean = (s) => (s || '').replace(/[\uE000-\uF8FF]/g, '').trim();
-      const address = clean(
-        document.querySelector('button[data-item-id="address"]')?.textContent
+  const task = (async () => {
+    try {
+      const details = await detailsLimiter(() =>
+        withBrowserActivity(async () => {
+          const context = await getContext();
+          const page = await context.newPage();
+
+          try {
+            await gotoWithRetry(page, cleanUrl, 30000);
+            await page.waitForTimeout(2000);
+            await checkPageAndConsent(page);
+
+            await page
+              .waitForSelector('h1.DUwDvf, button[jsaction*="photo"]', { timeout: 15000 })
+              .catch(() => {});
+
+            const scraped = await page.evaluate(() => {
+              const clean = (s) => (s || '').replace(/[\uE000-\uF8FF]/g, '').trim();
+              const address = clean(
+                document.querySelector('button[data-item-id="address"]')?.textContent
+              );
+              const phone = clean(
+                document.querySelector('button[data-item-id^="phone:"]')?.textContent
+              );
+              const website =
+                document.querySelector('a[data-item-id="authority"]')?.getAttribute('href') || '';
+              const hours = clean(
+                document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label')
+              );
+
+              const photoUrls = new Set();
+              const imgs = Array.from(document.querySelectorAll('img'));
+              for (const img of imgs) {
+                const src = img.getAttribute('src') || '';
+                if (
+                  (src.includes('googleusercontent.com') || src.includes('streetviewpixels')) &&
+                  !src.includes('/a/') &&
+                  !src.includes('=s32') &&
+                  !src.includes('=s40')
+                ) {
+                  photoUrls.add(src);
+                }
+              }
+
+              return {
+                address,
+                phone,
+                website,
+                hours,
+                photos: Array.from(photoUrls).slice(0, 12),
+              };
+            });
+
+            scraped.photos = scraped.photos
+              .map((u) => u.replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w1000-h750-k-no'))
+              .filter(Boolean);
+
+            return scraped;
+          } finally {
+            await page.close().catch(() => {});
+          }
+        })
       );
-      const phone = clean(
-        document.querySelector('button[data-item-id^="phone:"]')?.textContent
-      );
-      const website =
-        document.querySelector('a[data-item-id="authority"]')?.getAttribute('href') || '';
-      const hours = clean(
-        document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label')
-      );
 
-      const photoUrls = new Set();
-      const imgs = Array.from(document.querySelectorAll('img'));
-      for (const img of imgs) {
-        const src = img.getAttribute('src') || '';
-        if (
-          (src.includes('googleusercontent.com') || src.includes('streetviewpixels')) &&
-          !src.includes('/a/') &&
-          !src.includes('=s32') &&
-          !src.includes('=s40')
-        ) {
-          photoUrls.add(src);
+      if (
+        details.photos.length > 0 ||
+        details.address ||
+        details.phone ||
+        details.website ||
+        details.hours
+      ) {
+        if (DETAILS_CACHE.size >= DETAILS_CACHE_MAX) {
+          const oldestKey = DETAILS_CACHE.keys().next().value;
+          if (oldestKey !== undefined) DETAILS_CACHE.delete(oldestKey);
         }
+        DETAILS_CACHE.set(cleanUrl, {
+          data: details,
+          expiresAt: Date.now() + DETAILS_CACHE_TTL_MS,
+        });
       }
 
-      return {
-        address,
-        phone,
-        website,
-        hours,
-        photos: Array.from(photoUrls).slice(0, 12),
-      };
-    });
+      return details;
+    } finally {
+      INFLIGHT_DETAILS.delete(cleanUrl);
+    }
+  })();
 
-    details.photos = details.photos
-      .map((u) => u.replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w1000-h750-k-no'))
-      .filter(Boolean);
-
-    return details;
-  } finally {
-    await page.close().catch(() => {});
-  }
+  INFLIGHT_DETAILS.set(cleanUrl, task);
+  return task;
 }

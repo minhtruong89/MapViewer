@@ -9,6 +9,11 @@ import {
   getAuthStatus,
   closeBrowser,
 } from './scraper.js';
+import {
+  isValidCoordinates,
+  isValidGoogleMapsUrl,
+  normalizeCategory,
+} from './validators.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -54,6 +59,7 @@ app.get('/api/geocode', async (req, res) => {
       headers: {
         'User-Agent': 'AnalyzedMapApp/1.0 (local-research-tool)',
       },
+      signal: AbortSignal.timeout(10000),
     });
 
     if (!response.ok) {
@@ -82,19 +88,20 @@ app.post('/api/search', async (req, res) => {
   const { lat, lng, radiusKm = 5, category = 'all', customQuery = '', maxResults = 50 } =
     req.body || {};
 
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
+  if (!isValidCoordinates(lat, lng)) {
     return res.status(400).json({ error: 'Tọa độ tâm (lat, lng) không hợp lệ.' });
   }
 
   const clampedRadius = Math.max(0.2, Math.min(30, Number(radiusKm) || 5));
   const clampedMax = Math.max(5, Math.min(200, Number(maxResults) || 50));
+  const safeCategory = normalizeCategory(category);
 
   try {
     const places = await scrapeGoogleMaps({
       lat,
       lng,
       radiusKm: clampedRadius,
-      category,
+      category: safeCategory,
       customQuery,
       maxResults: clampedMax,
     });
@@ -120,7 +127,7 @@ app.post('/api/search', async (req, res) => {
  */
 app.get('/api/place-details', async (req, res) => {
   const url = String(req.query.url || '').trim();
-  if (!url || !url.startsWith('https://www.google.com/maps')) {
+  if (!isValidGoogleMapsUrl(url)) {
     return res.status(400).json({ error: 'URL Google Maps không hợp lệ.' });
   }
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Bookmark, Plus, Check, Map as MapIcon } from 'lucide-react';
 
 export default function SaveToMapModal({
@@ -9,6 +9,22 @@ export default function SaveToMapModal({
   onClose,
 }) {
   const [newMapName, setNewMapName] = useState('');
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!place) return;
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        onCloseRef.current?.();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [place]);
 
   if (!place) return null;
 

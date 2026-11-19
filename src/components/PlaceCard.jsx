@@ -16,6 +16,7 @@ export default function PlaceCard({
   place,
   isSelected,
   isSaved = false,
+  distanceBadge,
   onSelect,
   onOpenDetails,
   onSave,
@@ -23,6 +24,12 @@ export default function PlaceCard({
   onSetCenter,
 }) {
   const isLodging = place.type === 'lodging';
+  const resolvedBadge =
+    distanceBadge !== undefined
+      ? distanceBadge
+      : place.distanceKm != null
+        ? `${place.distanceKm} km`
+        : null;
 
   return (
     <div
@@ -64,9 +71,9 @@ export default function PlaceCard({
           </span>
         </div>
 
-        {place.distanceKm !== null && (
+        {resolvedBadge && (
           <span className="absolute top-2.5 right-2.5 px-2 py-1 rounded-full text-xs font-semibold bg-slate-900/75 text-white backdrop-blur-sm">
-            {place.distanceKm} km
+            {resolvedBadge}
           </span>
         )}
       </div>

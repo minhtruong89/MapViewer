@@ -111,6 +111,17 @@ export default function InteractiveMap({
   const centerMarkerRef = useRef(null);
   const circleRef = useRef(null);
   const placesLayerRef = useRef(null);
+  const onCenterChangeRef = useRef(onCenterChange);
+  const onSelectPlaceRef = useRef(onSelectPlace);
+  const lastFittedCoordsKeyRef = useRef('');
+
+  useEffect(() => {
+    onCenterChangeRef.current = onCenterChange;
+  }, [onCenterChange]);
+
+  useEffect(() => {
+    onSelectPlaceRef.current = onSelectPlace;
+  }, [onSelectPlace]);
 
   // Initialize Leaflet map once
   useEffect(() => {
@@ -130,15 +141,15 @@ export default function InteractiveMap({
 
     placesLayerRef.current = L.layerGroup().addTo(map);
 
-    if (onCenterChange) {
-      map.on('click', (e) => {
-        onCenterChange({
+    map.on('click', (e) => {
+      if (onCenterChangeRef.current) {
+        onCenterChangeRef.current({
           lat: Number(e.latlng.lat.toFixed(6)),
           lng: Number(e.latlng.lng.toFixed(6)),
           name: `Tọa độ (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`,
         });
-      });
-    }
+      }
+    });
 
     mapRef.current = map;
 
@@ -148,6 +159,7 @@ export default function InteractiveMap({
       centerMarkerRef.current = null;
       circleRef.current = null;
       placesLayerRef.current = null;
+      lastFittedCoordsKeyRef.current = '';
     };
   }, []);
 
@@ -168,6 +180,8 @@ export default function InteractiveMap({
       return;
     }
 
+    const safeCenterName = escapeHtml(center.name);
+
     if (centerMarkerRef.current) {
       centerMarkerRef.current.setLatLng([center.lat, center.lng]);
     } else {
@@ -176,11 +190,11 @@ export default function InteractiveMap({
         zIndexOffset: 1000,
       })
         .addTo(map)
-        .bindPopup(`<b>Tâm tìm kiếm</b><br/>${center.name}`);
+        .bindPopup(`<b>Tâm tìm kiếm</b><br/>${safeCenterName}`);
     }
 
     centerMarkerRef.current.setPopupContent(
-      `<div class="text-xs"><strong>Tâm tìm kiếm</strong><br/>${center.name}<br/>Bán kính: ${radiusKm} km</div>`
+      `<div class="text-xs"><strong>Tâm tìm kiếm</strong><br/>${safeCenterName}<br/>Bán kính: ${radiusKm} km</div>`
     );
 
     if (circleRef.current) {
@@ -215,6 +229,8 @@ export default function InteractiveMap({
       const isLodging = place.type === 'lodging';
       const color = isLodging ? '#4f46e5' : '#d97706';
       const ratingLabel = place.rating ? place.rating.toFixed(1) : '?';
+      const safePlaceName = escapeHtml(place.name);
+      const reviewLabel = (place.reviewCount ?? 0).toLocaleString('vi-VN');
 
       const marker = L.marker([place.lat, place.lng], {
         icon: showSearchCenter
@@ -224,9 +240,9 @@ export default function InteractiveMap({
 
       const popupHtml = `
         <div style="min-width:190px;font-family:inherit;">
-          <div style="font-weight:700;font-size:13px;margin-bottom:4px;">${place.name}</div>
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px;">${safePlaceName}</div>
           <div style="font-size:12px;color:#475569;margin-bottom:4px;">
-            ⭐ <b>${place.rating || 'N/A'}</b> (${place.reviewCount.toLocaleString('vi-VN')} đánh giá)
+            ⭐ <b>${place.rating || 'N/A'}</b> (${reviewLabel} đánh giá)
           </div>
           ${
             place.distanceKm !== null && showSearchCenter
@@ -238,15 +254,21 @@ export default function InteractiveMap({
 
       marker.bindPopup(popupHtml);
       marker.on('click', () => {
-        onSelectPlace(place);
+        onSelectPlaceRef.current?.(place);
       });
       marker.addTo(layer);
     });
 
     if (!showSearchCenter && coords.length > 0) {
-      map.fitBounds(L.latLngBounds(coords), { padding: [45, 45], maxZoom: 15 });
+      const coordsKey = coords.map(([la, ln]) => `${la},${ln}`).join('|');
+      if (coordsKey !== lastFittedCoordsKeyRef.current) {
+        lastFittedCoordsKeyRef.current = coordsKey;
+        map.fitBounds(L.latLngBounds(coords), { padding: [45, 45], maxZoom: 15 });
+      }
+    } else {
+      lastFittedCoordsKeyRef.current = '';
     }
-  }, [places, onSelectPlace, showSearchCenter]);
+  }, [places, showSearchCenter]);
 
   // Pan to selected place
   useEffect(() => {

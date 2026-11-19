@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   X,
   Star,
@@ -13,14 +13,35 @@ import {
   ChevronRight,
 } from 'lucide-react';
 
-export default function PlaceModal({ place, onClose }) {
+export default function PlaceModal({ place, onClose, onEnriched }) {
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
 
+  const onCloseRef = useRef(onClose);
+  const onEnrichedRef = useRef(onEnriched);
+
   useEffect(() => {
-    if (!place) return;
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    onEnrichedRef.current = onEnriched;
+  }, [onEnriched]);
+
+  const photos =
+    details?.photos && details.photos.length > 0
+      ? details.photos
+      : place?.imageUrl
+        ? [place.imageUrl]
+        : [];
+
+  useEffect(() => {
+    if (!place?.mapsUrl) {
+      setLoading(false);
+      return;
+    }
     setDetails(null);
     setError('');
     setActiveIdx(0);
@@ -37,6 +58,7 @@ export default function PlaceModal({ place, onClose }) {
       })
       .then((data) => {
         setDetails(data);
+        onEnrichedRef.current?.(place.id, data);
       })
       .catch((err) => {
         if (err.name !== 'AbortError') {
@@ -46,18 +68,28 @@ export default function PlaceModal({ place, onClose }) {
       .finally(() => setLoading(false));
 
     return () => controller.abort();
-  }, [place]);
+  }, [place?.id, place?.mapsUrl]);
+
+  useEffect(() => {
+    if (!place) return;
+    const photoCount = photos.length;
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        onCloseRef.current?.();
+      } else if (e.key === 'ArrowLeft' && photoCount > 1) {
+        setActiveIdx((i) => (i - 1 + photoCount) % photoCount);
+      } else if (e.key === 'ArrowRight' && photoCount > 1) {
+        setActiveIdx((i) => (i + 1) % photoCount);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [place, photos.length]);
 
   if (!place) return null;
 
-  const photos =
-    details?.photos && details.photos.length > 0
-      ? details.photos
-      : place.imageUrl
-        ? [place.imageUrl]
-        : [];
-
   const currentPhoto = photos[activeIdx] || null;
+  const displayPhone = details?.phone || place.phone;
 
   return (
     <div
@@ -217,10 +249,15 @@ export default function PlaceModal({ place, onClose }) {
                 <span>{details.hours}</span>
               </div>
             )}
-            {details?.phone && (
+            {displayPhone && (
               <div className="flex items-center gap-2.5">
                 <Phone className="w-4 h-4 text-slate-400 shrink-0" />
-                <span>{details.phone}</span>
+                <a
+                  href={`tel:${displayPhone.replace(/\s+/g, '')}`}
+                  className="text-blue-600 hover:underline font-medium"
+                >
+                  {displayPhone}
+                </a>
               </div>
             )}
             {details?.website && (

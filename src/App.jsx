@@ -1,28 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  MapPin,
-  Search,
-  SlidersHorizontal,
-  Star,
-  BedDouble,
-  Utensils,
-  Layers,
-  Loader2,
-  Compass,
-  AlertCircle,
-  ArrowUpDown,
-  Sparkles,
-  UserCheck,
-  Map as MapIcon,
-  X,
-} from 'lucide-react';
-import InteractiveMap from './components/InteractiveMap';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2, AlertCircle, Sparkles } from 'lucide-react';
+import Header from './components/Header';
+import SearchSidebar from './components/SearchSidebar';
+import ResultsToolbar from './components/ResultsToolbar';
 import PlaceCard from './components/PlaceCard';
 import PlaceModal from './components/PlaceModal';
 import SaveToMapModal from './components/SaveToMapModal';
 import SavedMapsView from './components/SavedMapsView';
+import { useSavedMaps } from './hooks/useSavedMaps';
 
-const SAVED_MAPS_STORAGE_KEY = 'analyzed_map_saved_v1';
 const CENTERS_STORAGE_KEY = 'analyzed_map_centers_v1';
 const LAST_CENTER_STORAGE_KEY = 'analyzed_map_last_center_v1';
 
@@ -42,19 +28,35 @@ export default function App() {
       const raw = localStorage.getItem(CENTERS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed.filter(
+            (c) =>
+              typeof c?.lat === 'number' &&
+              Number.isFinite(c.lat) &&
+              typeof c?.lng === 'number' &&
+              Number.isFinite(c.lng) &&
+              c?.name
+          );
+        }
       }
     } catch {
       // Fallback to defaults
     }
     return DEFAULT_PRESET_CENTERS;
   });
+
   const [center, setCenter] = useState(() => {
     try {
       const raw = localStorage.getItem(LAST_CENTER_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed?.lat === 'number' && typeof parsed?.lng === 'number' && parsed?.name) {
+        if (
+          typeof parsed?.lat === 'number' &&
+          Number.isFinite(parsed.lat) &&
+          typeof parsed?.lng === 'number' &&
+          Number.isFinite(parsed.lng) &&
+          parsed?.name
+        ) {
           return parsed;
         }
       }
@@ -63,15 +65,11 @@ export default function App() {
     }
     return FALLBACK_DEFAULT_CENTER;
   });
+
   const [radiusKm, setRadiusKm] = useState(5);
   const [category, setCategory] = useState('all'); // 'all' | 'lodging' | 'restaurant'
   const [customQuery, setCustomQuery] = useState('');
   const [maxResults, setMaxResults] = useState(50);
-
-  // Geocode search
-  const [locationInput, setLocationInput] = useState('');
-  const [geoSuggestions, setGeoSuggestions] = useState([]);
-  const [geoLoading, setGeoLoading] = useState(false);
 
   // Scraping state
   const [places, setPlaces] = useState([]);
@@ -85,14 +83,17 @@ export default function App() {
   const [minRating, setMinRating] = useState(0);
   const [minReviews, setMinReviews] = useState(0);
   const [keywordFilter, setKeywordFilter] = useState('');
+  const [debouncedKeyword, setDebouncedKeyword] = useState('');
 
-  // Selection & modal
+  // Selection, modal & auth state
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [modalPlace, setModalPlace] = useState(null);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginNotice, setLoginNotice] = useState('');
   const [hasProfile, setHasProfile] = useState(false);
   const [supportsGuiLogin, setSupportsGuiLogin] = useState(false);
+
+  // Background thumbnail enrichment
   const [searchSeq, setSearchSeq] = useState(0);
   const [bgProgress, setBgProgress] = useState(null);
   const enrichedIdsRef = useRef(new Set());
@@ -100,23 +101,20 @@ export default function App() {
 
   // Two main modes: 'search' | 'saved'
   const [activeView, setActiveView] = useState('search');
-  const [savedMaps, setSavedMaps] = useState(() => {
-    try {
-      const raw = localStorage.getItem(SAVED_MAPS_STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  });
   const [saveTargetPlace, setSaveTargetPlace] = useState(null);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(SAVED_MAPS_STORAGE_KEY, JSON.stringify(savedMaps));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [savedMaps]);
+  const {
+    savedMaps,
+    savedPlaceIds,
+    toggleMap,
+    createAndSave,
+    renameMap,
+    removeItem,
+    deleteMap,
+    updatePlaceInSavedMaps,
+    exportMapsJson,
+    importMapsJson,
+  } = useSavedMaps();
 
   useEffect(() => {
     try {
@@ -134,7 +132,24 @@ export default function App() {
     }
   }, [center]);
 
-  function handleSetAndAddCenter(newCenter) {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedKeyword(keywordFilter);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [keywordFilter]);
+
+  useEffect(() => {
+    fetch('/api/auth/status')
+      .then((r) => r.json())
+      .then((d) => {
+        setHasProfile(Boolean(d?.hasProfile));
+        setSupportsGuiLogin(Boolean(d?.supportsGuiLogin));
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSetAndAddCenter = useCallback((newCenter) => {
     setCenter(newCenter);
     setPresetCenters((prev) => {
       const exists = prev.some(
@@ -146,64 +161,36 @@ export default function App() {
       if (exists) return prev;
       return [...prev, newCenter];
     });
-  }
-
-  function handleRemovePresetCenter(nameToRemove) {
-    setPresetCenters((prev) => prev.filter((c) => c.name !== nameToRemove));
-  }
-
-  const savedPlaceIds = useMemo(() => {
-    const ids = new Set();
-    savedMaps.forEach((m) => m.items.forEach((it) => ids.add(it.id)));
-    return ids;
-  }, [savedMaps]);
-
-  function handleToggleMap(mapId, place) {
-    setSavedMaps((prev) =>
-      prev.map((m) => {
-        if (m.id !== mapId) return m;
-        const exists = m.items.some((it) => it.id === place.id);
-        return {
-          ...m,
-          items: exists
-            ? m.items.filter((it) => it.id !== place.id)
-            : [...m.items, place],
-        };
-      })
-    );
-  }
-
-  function handleCreateAndSave(mapName, place) {
-    const newMap = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      name: mapName,
-      createdAt: new Date().toISOString(),
-      items: [place],
-    };
-    setSavedMaps((prev) => [newMap, ...prev]);
-  }
-
-  function handleRemoveItemFromMap(mapId, placeId) {
-    setSavedMaps((prev) =>
-      prev.map((m) =>
-        m.id === mapId ? { ...m, items: m.items.filter((it) => it.id !== placeId) } : m
-      )
-    );
-  }
-
-  function handleDeleteMap(mapId) {
-    setSavedMaps((prev) => prev.filter((m) => m.id !== mapId));
-  }
-
-  useEffect(() => {
-    fetch('/api/auth/status')
-      .then((r) => r.json())
-      .then((d) => {
-        setHasProfile(Boolean(d?.hasProfile));
-        setSupportsGuiLogin(Boolean(d?.supportsGuiLogin));
-      })
-      .catch(() => {});
   }, []);
+
+  const handleRemovePresetCenter = useCallback((nameToRemove) => {
+    setPresetCenters((prev) => prev.filter((c) => c.name !== nameToRemove));
+  }, []);
+
+  const handlePlaceEnriched = useCallback(
+    (placeId, data) => {
+      enrichedIdsRef.current.add(placeId);
+      const firstPhoto = data?.photos?.[0] || null;
+      const nextAddr = data?.address || '';
+      const nextTel = data?.phone || '';
+      if (!firstPhoto && !nextAddr && !nextTel) return;
+
+      const patchItem = (p) =>
+        p.id === placeId
+          ? {
+              ...p,
+              imageUrl: p.imageUrl || firstPhoto,
+              address: nextAddr || p.address,
+              phone: p.phone || nextTel || '',
+            }
+          : p;
+
+      setPlaces((prev) => prev.map(patchItem));
+      setSelectedPlace((prev) => (prev && prev.id === placeId ? patchItem(prev) : prev));
+      updatePlaceInSavedMaps(placeId, data);
+    },
+    [updatePlaceInSavedMaps]
+  );
 
   async function handleOpenLogin() {
     setLoginLoading(true);
@@ -219,30 +206,6 @@ export default function App() {
       setError(err.message);
     } finally {
       setLoginLoading(false);
-    }
-  }
-
-  async function handleGeocode(e) {
-    e.preventDefault();
-    const q = locationInput.trim();
-    if (!q) return;
-
-    setGeoLoading(true);
-    setGeoSuggestions([]);
-    try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Không tìm thấy địa điểm.');
-      setGeoSuggestions(data.suggestions || []);
-      if (data.suggestions?.length === 1) {
-        const first = data.suggestions[0];
-        setCenter({ name: first.shortName, lat: first.lat, lng: first.lng });
-        setGeoSuggestions([]);
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setGeoLoading(false);
     }
   }
 
@@ -320,12 +283,18 @@ export default function App() {
     });
   }, [places, filterType, minRating, minReviews, keywordFilter, sortBy]);
 
-  // Background queue: fetch missing thumbnails (and full address/phone) sequentially
-  // Restarts in the new display order when sorted/filtered, and cancels on new search.
-  useEffect(() => {
-    if (searchSeq === 0 || loading) return;
+  const filteredPlacesRef = useRef(filteredPlaces);
+  filteredPlacesRef.current = filteredPlaces;
 
-    const queue = filteredPlaces.filter(
+  // Background queue: fetch missing thumbnails (and full address/phone) sequentially
+  // Pauses when leaving Search tab, restarts in display order when sorted/filtered, and cancels on new search.
+  useEffect(() => {
+    if (searchSeq === 0 || loading || activeView !== 'search') {
+      setBgProgress(null);
+      return;
+    }
+
+    const queue = filteredPlacesRef.current.filter(
       (p) => !p.imageUrl && !enrichedIdsRef.current.has(p.id)
     );
     if (queue.length === 0) {
@@ -367,6 +336,7 @@ export default function App() {
                     : p
                 )
               );
+              updatePlaceInSavedMaps(item.id, data);
             }
           } else {
             enrichedIdsRef.current.add(item.id);
@@ -392,7 +362,17 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [searchSeq, loading, sortBy, filterType, minRating, minReviews, keywordFilter]);
+  }, [
+    searchSeq,
+    loading,
+    activeView,
+    sortBy,
+    filterType,
+    minRating,
+    minReviews,
+    debouncedKeyword,
+    updatePlaceInSavedMaps,
+  ]);
 
   // Summary metrics
   const stats = useMemo(() => {
@@ -419,525 +399,134 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      {/* Top Navbar */}
-      <header className="sm:sticky sm:top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center shadow-sm">
-              <Compass className="w-5 h-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-extrabold text-slate-900 leading-tight">
-                MapAnalyzer
-              </h1>
-              <p className="text-xs text-slate-500">
-                Phân tích Nơi ở & Ăn uống từ Google Maps theo bán kính
-              </p>
-            </div>
-          </div>
+      <Header
+        activeView={activeView}
+        onChangeView={setActiveView}
+        savedMapsCount={savedMaps.length}
+        onSelectCenter={handleSetAndAddCenter}
+        onError={setError}
+        supportsGuiLogin={supportsGuiLogin}
+        hasProfile={hasProfile}
+        loginLoading={loginLoading}
+        onOpenLogin={handleOpenLogin}
+        loginNotice={loginNotice}
+        onDismissLoginNotice={() => setLoginNotice('')}
+      />
 
-          {/* Main Mode Switcher: Tìm kiếm / Xem map */}
-          <div className="inline-flex items-center p-1 rounded-2xl bg-slate-100 border border-slate-200/80">
-            <button
-              type="button"
-              onClick={() => setActiveView('search')}
-              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeView === 'search'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Search className="w-3.5 h-3.5" />
-              Tìm kiếm
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveView('saved')}
-              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeView === 'saved'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <MapIcon className="w-3.5 h-3.5" />
-              Xem map
-              {savedMaps.length > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-extrabold">
-                  {savedMaps.length}
-                </span>
-              )}
-            </button>
-          </div>
-
-          {/* Area Geocode Search (Search mode only) */}
-          {activeView === 'search' && (
-            <div className="relative w-full md:w-auto md:flex-1 md:max-w-md order-3 md:order-none">
-            <form onSubmit={handleGeocode} className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={locationInput}
-                  onChange={(e) => setLocationInput(e.target.value)}
-                  placeholder="Tìm tâm khu vực (vd: Hồ Xuân Hương, Đà Lạt)..."
-                  className="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={geoLoading}
-                className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer shrink-0"
-              >
-                {geoLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Đặt tâm'}
-              </button>
-            </form>
-
-            {geoSuggestions.length > 0 && (
-              <div className="absolute left-0 right-0 mt-1.5 bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden z-50">
-                {geoSuggestions.map((item, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => {
-                      setCenter({ name: item.shortName, lat: item.lat, lng: item.lng });
-                      setLocationInput(item.shortName);
-                      setGeoSuggestions([]);
-                    }}
-                    className="w-full text-left px-4 py-2.5 text-xs hover:bg-blue-50 border-b last:border-b-0 border-slate-100 flex items-start gap-2 cursor-pointer"
-                  >
-                    <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-                    <span className="text-slate-700 line-clamp-2">{item.name}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          )}
-
-          {supportsGuiLogin && (
-            <button
-              type="button"
-              onClick={handleOpenLogin}
-              disabled={loginLoading}
-              title="Mở trình duyệt để đăng nhập hoặc đổi tài khoản Google"
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer shrink-0 disabled:opacity-60 ${
-                hasProfile
-                  ? 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
-                  : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-              }`}
-            >
-              {loginLoading ? (
-                <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-              ) : (
-                <UserCheck className="w-4 h-4 text-emerald-600" />
-              )}
-              {hasProfile ? 'Hồ sơ Google (đã lưu)' : 'Đăng nhập Google'}
-            </button>
-          )}
-        </div>
-        {loginNotice && (
-          <div className="bg-emerald-50 border-t border-emerald-200 px-4 sm:px-6 py-2 text-xs text-emerald-800 flex items-center justify-between gap-3">
-            <span>{loginNotice}</span>
-            <button
-              type="button"
-              onClick={() => setLoginNotice('')}
-              className="font-bold hover:underline cursor-pointer shrink-0"
-            >
-              Đã hiểu
-            </button>
-          </div>
-        )}
-      </header>
-
-      {/* Main Content */}
       {activeView === 'saved' ? (
         <SavedMapsView
           savedMaps={savedMaps}
-          onDeleteMap={handleDeleteMap}
-          onRemoveItem={handleRemoveItemFromMap}
+          onDeleteMap={deleteMap}
+          onRenameMap={renameMap}
+          onRemoveItem={removeItem}
           onOpenDetails={(p) => setModalPlace(p)}
           onSwitchToSearch={() => setActiveView('search')}
+          onExportMaps={exportMapsJson}
+          onImportMaps={importMapsJson}
         />
       ) : (
         <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Left Sidebar: Controls */}
-        <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-5">
-            {/* Selected Center */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                1. Điểm trung tâm
-              </label>
-              <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200/70">
-                <div className="font-semibold text-sm text-slate-900 flex items-center gap-1.5">
-                  <MapPin className="w-4 h-4 text-rose-600 shrink-0" />
-                  <span className="truncate">{center.name}</span>
-                </div>
-                <div className="text-xs text-slate-500 mt-1">
-                  {center.lat.toFixed(5)}, {center.lng.toFixed(5)} · Nhấp bản đồ để đổi
+          <SearchSidebar
+            center={center}
+            presetCenters={presetCenters}
+            onSelectCenter={setCenter}
+            onRemovePresetCenter={handleRemovePresetCenter}
+            onMapCenterChange={setCenter}
+            radiusKm={radiusKm}
+            onRadiusChange={setRadiusKm}
+            category={category}
+            onCategoryChange={setCategory}
+            customQuery={customQuery}
+            onCustomQueryChange={setCustomQuery}
+            maxResults={maxResults}
+            onMaxResultsChange={setMaxResults}
+            loading={loading}
+            onSearch={handleSearch}
+            places={filteredPlaces}
+            selectedPlace={selectedPlace}
+            onSelectPlace={setSelectedPlace}
+          />
+
+          <section className="lg:col-span-8 xl:col-span-9 space-y-4">
+            {error && (
+              <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-sm flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">Không thể hoàn tất yêu cầu</p>
+                  <p className="text-xs mt-0.5 text-rose-700">{error}</p>
                 </div>
               </div>
+            )}
 
-              {/* Quick Presets (with remove button) */}
-              {presetCenters.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-2.5">
-                  {presetCenters.map((preset) => {
-                    const isActive = center.name === preset.name;
-                    return (
-                      <div
-                        key={preset.name}
-                        className={`inline-flex items-center rounded-lg text-xs font-medium transition-colors ${
-                          isActive
-                            ? 'bg-slate-900 text-white'
-                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setCenter(preset)}
-                          className="pl-2.5 pr-1.5 py-1 cursor-pointer truncate max-w-[170px]"
-                          title={preset.name}
-                        >
-                          {preset.name.split(',')[0]}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleRemovePresetCenter(preset.name);
-                          }}
-                          className={`pr-1.5 pl-0.5 py-1 rounded-r-lg transition-colors cursor-pointer ${
-                            isActive
-                              ? 'text-slate-300 hover:text-white'
-                              : 'text-slate-400 hover:text-rose-600'
-                          }`}
-                          title="Xóa điểm trung tâm này"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+            <ResultsToolbar
+              stats={stats}
+              radiusKm={radiusKm}
+              centerName={center.name}
+              filterType={filterType}
+              onFilterTypeChange={setFilterType}
+              minRating={minRating}
+              onMinRatingChange={setMinRating}
+              minReviews={minReviews}
+              onMinReviewsChange={setMinReviews}
+              keywordFilter={keywordFilter}
+              onKeywordFilterChange={setKeywordFilter}
+              sortBy={sortBy}
+              onSortByChange={setSortBy}
+              bgProgress={bgProgress}
+            />
 
-            {/* Radius */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  2. Bán kính tỏa ra
-                </label>
-                <span className="text-sm font-extrabold text-blue-600">
-                  {radiusKm} km
-                </span>
+            {/* Results Grid */}
+            {loading ? (
+              <div className="bg-white rounded-3xl border border-slate-200 p-16 flex flex-col items-center justify-center text-center">
+                <Loader2 className="w-10 h-10 text-blue-600 animate-spin mb-3" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Đang thu thập dữ liệu từ Google Maps...
+                </h3>
+                <p className="text-xs text-slate-500 mt-1 max-w-md">
+                  Hệ thống đang quét các địa điểm quanh <strong>{center.name}</strong> trong bán kính{' '}
+                  <strong>{radiusKm} km</strong>. Quá trình này thường mất 10–25 giây.
+                </p>
               </div>
-              <input
-                type="range"
-                min="0.5"
-                max="30"
-                step="0.5"
-                value={radiusKm}
-                onChange={(e) => setRadiusKm(parseFloat(e.target.value))}
-                className="w-full accent-blue-600 cursor-pointer"
-              />
-              <div className="flex justify-between gap-1 mt-2">
-                {[1, 3, 5, 10, 20, 30].map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => setRadiusKm(r)}
-                    className={`flex-1 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                      radiusKm === r
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                    }`}
-                  >
-                    {r}km
-                  </button>
+            ) : filteredPlaces.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                {filteredPlaces.map((place) => (
+                  <PlaceCard
+                    key={place.id}
+                    place={place}
+                    isSelected={selectedPlace?.id === place.id}
+                    isSaved={savedPlaceIds.has(place.id)}
+                    onSelect={(p) => setSelectedPlace(p)}
+                    onOpenDetails={(p) => setModalPlace(p)}
+                    onSave={(p) => setSaveTargetPlace(p)}
+                    onSetCenter={(p) =>
+                      handleSetAndAddCenter({
+                        name: p.name,
+                        lat: p.lat,
+                        lng: p.lng,
+                      })
+                    }
+                  />
                 ))}
               </div>
-            </div>
-
-            {/* Category */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                3. Loại địa điểm
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { id: 'all', label: 'Tất cả', icon: Layers },
-                  { id: 'lodging', label: 'Nơi ở', icon: BedDouble },
-                  { id: 'restaurant', label: 'Ăn uống', icon: Utensils },
-                ].map((item) => {
-                  const Icon = item.icon;
-                  const active = category === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setCategory(item.id)}
-                      className={`flex flex-col items-center justify-center gap-1 py-2.5 px-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
-                        active
-                          ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
-                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Icon className="w-4 h-4" />
-                      {item.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Optional Custom Keyword & Max Results */}
-            <div className="grid grid-cols-3 gap-2">
-              <div className="col-span-2">
-                <label className="block text-xs font-semibold text-slate-600 mb-1">
-                  Từ khóa thêm (tùy chọn)
-                </label>
-                <input
-                  type="text"
-                  value={customQuery}
-                  onChange={(e) => setCustomQuery(e.target.value)}
-                  placeholder="vd: homestay, lẩu gà..."
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">
-                  Tối đa
-                </label>
-                <select
-                  value={maxResults}
-                  onChange={(e) => setMaxResults(Number(e.target.value))}
-                  className="w-full px-2 py-2 text-xs rounded-xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-                >
-                  <option value={20}>20</option>
-                  <option value={30}>30</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                  <option value={150}>150</option>
-                  <option value={200}>200</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Search CTA */}
-            <button
-              type="button"
-              onClick={handleSearch}
-              disabled={loading}
-              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-sm shadow-md shadow-blue-600/20 flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Đang quét Google Maps...
-                </>
-              ) : (
-                <>
-                  <Search className="w-4 h-4" />
-                  Quét dữ liệu Google Maps
-                </>
-              )}
-            </button>
-          </div>
-
-          {/* Interactive Map on Sidebar (or Mobile) */}
-          <div className="h-[340px] lg:h-[380px]">
-            <InteractiveMap
-              center={center}
-              radiusKm={radiusKm}
-              places={filteredPlaces}
-              selectedPlace={selectedPlace}
-              onCenterChange={setCenter}
-              onSelectPlace={(p) => setSelectedPlace(p)}
-            />
-          </div>
-        </aside>
-
-        {/* Right Panel: Stats, Filters, Sort & Results */}
-        <section className="lg:col-span-8 xl:col-span-9 space-y-4">
-          {error && (
-            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-sm flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">Không thể hoàn tất yêu cầu</p>
-                <p className="text-xs mt-0.5 text-rose-700">{error}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Summary KPI Bar */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
-              <p className="text-xs text-slate-500 font-medium">Địa điểm tìm thấy</p>
-              <p className="text-2xl font-extrabold text-slate-900 mt-1">{stats.total}</p>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                {stats.lodgingCount} nơi ở · {stats.restaurantCount} ăn uống
-              </p>
-            </div>
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
-              <p className="text-xs text-slate-500 font-medium">Sao trung bình</p>
-              <div className="flex items-center gap-1.5 mt-1">
-                <p className="text-2xl font-extrabold text-slate-900">
-                  {stats.avgRating || '—'}
+            ) : (
+              <div className="bg-white rounded-3xl border border-dashed border-slate-300 p-14 flex flex-col items-center justify-center text-center">
+                <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mb-3">
+                  <Sparkles className="w-7 h-7" />
+                </div>
+                <h3 className="text-base font-bold text-slate-900">
+                  {hasSearched
+                    ? 'Không có địa điểm nào khớp bộ lọc hiện tại'
+                    : 'Sẵn sàng khám phá khu vực của bạn'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-1.5 max-w-md">
+                  {hasSearched
+                    ? 'Hãy thử tăng bán kính tìm kiếm, nới lỏng bộ lọc số sao / lượt review hoặc chọn tâm khác.'
+                    : 'Chọn điểm trung tâm (vd: Hồ Xuân Hương), điều chỉnh bán kính (km) và nhấn "Quét dữ liệu Google Maps" để bắt đầu.'}
                 </p>
-                <Star className="w-5 h-5 fill-amber-400 text-amber-500" />
               </div>
-              <p className="text-[11px] text-slate-400 mt-0.5">Trong bán kính {radiusKm} km</p>
-            </div>
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
-              <p className="text-xs text-slate-500 font-medium">Tổng lượt review</p>
-              <p className="text-2xl font-extrabold text-slate-900 mt-1">
-                {stats.totalReviews.toLocaleString('vi-VN')}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">Cộng dồn các điểm</p>
-            </div>
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
-              <p className="text-xs text-slate-500 font-medium">Khu vực tâm</p>
-              <p className="text-sm font-bold text-slate-900 mt-1.5 truncate">{center.name}</p>
-              <p className="text-[11px] text-blue-600 font-semibold mt-1">
-                Bán kính {radiusKm} km
-              </p>
-            </div>
-          </div>
-
-          {/* Filter & Sort Toolbar */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-xs flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
-              <SlidersHorizontal className="w-4 h-4 text-slate-400" />
-              Lọc:
-            </div>
-
-            {/* Type filter */}
-            <select
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value)}
-              className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold bg-slate-50 text-slate-700 focus:outline-none"
-            >
-              <option value="all">Tất cả loại</option>
-              <option value="lodging">Chỉ Nơi ở</option>
-              <option value="restaurant">Chỉ Ăn uống</option>
-            </select>
-
-            {/* Min rating */}
-            <select
-              value={minRating}
-              onChange={(e) => setMinRating(Number(e.target.value))}
-              className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold bg-slate-50 text-slate-700 focus:outline-none"
-            >
-              <option value={0}>Mọi số sao</option>
-              <option value={4.0}>Từ 4.0 ★ trở lên</option>
-              <option value={4.5}>Từ 4.5 ★ trở lên</option>
-              <option value={4.8}>Từ 4.8 ★ trở lên</option>
-            </select>
-
-            {/* Min reviews */}
-            <select
-              value={minReviews}
-              onChange={(e) => setMinReviews(Number(e.target.value))}
-              className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold bg-slate-50 text-slate-700 focus:outline-none"
-            >
-              <option value={0}>Mọi lượt review</option>
-              <option value={50}>≥ 50 review</option>
-              <option value={100}>≥ 100 review</option>
-              <option value={500}>≥ 500 review</option>
-              <option value={1000}>≥ 1.000 review</option>
-            </select>
-
-            {/* Quick text filter */}
-            <input
-              type="text"
-              value={keywordFilter}
-              onChange={(e) => setKeywordFilter(e.target.value)}
-              placeholder="Lọc tên / đường..."
-              className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs bg-slate-50 focus:bg-white focus:outline-none flex-1 min-w-[140px]"
-            />
-
-            {/* Sort dropdown */}
-            <div className="flex items-center gap-1.5 ml-auto">
-              <ArrowUpDown className="w-4 h-4 text-slate-400" />
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                className="px-3 py-1.5 rounded-xl border border-blue-200 text-xs font-bold bg-blue-50 text-blue-800 focus:outline-none"
-              >
-                <option value="rating_desc">Sắp xếp: Số sao cao nhất</option>
-                <option value="reviews_desc">Sắp xếp: Nhiều review nhất</option>
-                <option value="distance_asc">Sắp xếp: Gần tâm nhất</option>
-                <option value="rating_asc">Sắp xếp: Số sao thấp nhất</option>
-                <option value="reviews_asc">Sắp xếp: Ít review nhất</option>
-              </select>
-            </div>
-          </div>
-
-          {bgProgress && (
-            <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-50/80 border border-blue-200/70 text-xs text-blue-800">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
-              <span>
-                Đang tải ngầm ảnh đại diện cho các thẻ còn thiếu:{' '}
-                <strong>
-                  {bgProgress.done}/{bgProgress.total}
-                </strong>
-              </span>
-            </div>
-          )}
-
-          {/* Results Grid */}
-          {loading ? (
-            <div className="bg-white rounded-3xl border border-slate-200 p-16 flex flex-col items-center justify-center text-center">
-              <Loader2 className="w-10 h-10 text-blue-600 animate-spin mb-3" />
-              <h3 className="text-base font-bold text-slate-900">
-                Đang thu thập dữ liệu từ Google Maps...
-              </h3>
-              <p className="text-xs text-slate-500 mt-1 max-w-md">
-                Hệ thống đang quét các địa điểm quanh <strong>{center.name}</strong> trong bán kính{' '}
-                <strong>{radiusKm} km</strong>. Quá trình này thường mất 10–25 giây.
-              </p>
-            </div>
-          ) : filteredPlaces.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredPlaces.map((place) => (
-                <PlaceCard
-                  key={place.id}
-                  place={place}
-                  isSelected={selectedPlace?.id === place.id}
-                  isSaved={savedPlaceIds.has(place.id)}
-                  onSelect={(p) => setSelectedPlace(p)}
-                  onOpenDetails={(p) => setModalPlace(p)}
-                  onSave={(p) => setSaveTargetPlace(p)}
-                  onSetCenter={(p) =>
-                    handleSetAndAddCenter({
-                      name: p.name,
-                      lat: p.lat,
-                      lng: p.lng,
-                    })
-                  }
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="bg-white rounded-3xl border border-dashed border-slate-300 p-14 flex flex-col items-center justify-center text-center">
-              <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mb-3">
-                <Sparkles className="w-7 h-7" />
-              </div>
-              <h3 className="text-base font-bold text-slate-900">
-                {hasSearched
-                  ? 'Không có địa điểm nào khớp bộ lọc hiện tại'
-                  : 'Sẵn sàng khám phá khu vực của bạn'}
-              </h3>
-              <p className="text-xs text-slate-500 mt-1.5 max-w-md">
-                {hasSearched
-                  ? 'Hãy thử tăng bán kính tìm kiếm, nới lỏng bộ lọc số sao / lượt review hoặc chọn tâm khác.'
-                  : 'Chọn điểm trung tâm (vd: Hồ Xuân Hương), điều chỉnh bán kính (km) và nhấn "Quét dữ liệu Google Maps" để bắt đầu.'}
-              </p>
-            </div>
-          )}
-        </section>
-      </main>
+            )}
+          </section>
+        </main>
       )}
 
       {/* Save to Map Modal */}
@@ -945,15 +534,19 @@ export default function App() {
         <SaveToMapModal
           place={saveTargetPlace}
           savedMaps={savedMaps}
-          onToggleMap={handleToggleMap}
-          onCreateAndSave={handleCreateAndSave}
+          onToggleMap={toggleMap}
+          onCreateAndSave={createAndSave}
           onClose={() => setSaveTargetPlace(null)}
         />
       )}
 
       {/* Detail & Photo Gallery Modal */}
       {modalPlace && (
-        <PlaceModal place={modalPlace} onClose={() => setModalPlace(null)} />
+        <PlaceModal
+          place={modalPlace}
+          onClose={() => setModalPlace(null)}
+          onEnriched={handlePlaceEnriched}
+        />
       )}
     </div>
   );
