@@ -20,6 +20,33 @@ import {
   Pencil,
 } from 'lucide-react';
 import { formatDurationMin } from '../utils/geo';
+import { splitTextAndStatus } from '../utils/categoryStyle';
+import CategoryBadge from './CategoryBadge';
+
+function CategoryAndAddress({ place }) {
+  const { text: cleanAddress, status: addressStatus } = splitTextAndStatus(place.address);
+  const resolvedOpenStatus = place.openStatus || addressStatus;
+
+  return (
+    <>
+      {/* Category & Status */}
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <CategoryBadge
+          label={place.categoryLabel}
+          type={place.type}
+          placeName={place.name}
+          openStatus={resolvedOpenStatus}
+        />
+      </div>
+      {cleanAddress && (
+        <p className="text-xs text-slate-500 flex items-start gap-1 line-clamp-2 mb-1.5">
+          <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+          <span>{cleanAddress}</span>
+        </p>
+      )}
+    </>
+  );
+}
 
 export default function PlaceCard({
   place,
@@ -33,6 +60,7 @@ export default function PlaceCard({
   onSetCenter,
   onUpdateNote,
   onToggleVisited,
+  onToggleAlwaysShow,
   routeStopNumber = null,
   onToggleRouteStop,
 }) {
@@ -159,16 +187,7 @@ export default function PlaceCard({
           )}
         </div>
 
-        {/* Category & Address */}
-        <p className="text-xs font-medium text-slate-500 mb-1 truncate">
-          {place.categoryLabel}
-        </p>
-        {place.address && (
-          <p className="text-xs text-slate-500 flex items-start gap-1 line-clamp-2 mb-1.5">
-            <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-            <span>{place.address}</span>
-          </p>
-        )}
+        <CategoryAndAddress place={place} />
         {place.phone && (
           <p className="text-xs text-slate-600 flex items-center gap-1 mb-2.5">
             <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -182,8 +201,8 @@ export default function PlaceCard({
           </p>
         )}
 
-        {/* Personal Note & Visited Controls (Saved Maps only) */}
-        {(onUpdateNote || onToggleVisited) && (
+        {/* Personal Note, Visited & Map Visibility Controls (Saved Maps only) */}
+        {(onUpdateNote || onToggleVisited || onToggleAlwaysShow) && (
           <div className="mb-2.5 space-y-2" onClick={(e) => e.stopPropagation()}>
             {editingNote ? (
               <div className="flex items-center gap-1.5">
@@ -269,6 +288,26 @@ export default function PlaceCard({
                   <CheckCircle2 className="w-3 h-3" />
                   {place.visited ? 'Đã đi' : 'Đánh dấu đã đi'}
                 </button>
+              )}
+
+              {onToggleAlwaysShow && (
+                <label
+                  onClick={(e) => e.stopPropagation()}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer select-none ${
+                    place.alwaysShow
+                      ? 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                  }`}
+                  title="Luôn hiển thị điểm này trên bản đồ kể cả khi lọc Đã đi / Chưa đi"
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(place.alwaysShow)}
+                    onChange={() => onToggleAlwaysShow(place)}
+                    className="w-3 h-3 accent-blue-600 rounded cursor-pointer"
+                  />
+                  Luôn hiện
+                </label>
               )}
             </div>
           </div>

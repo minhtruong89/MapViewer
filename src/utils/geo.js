@@ -40,6 +40,20 @@ export function formatDurationMin(minutes) {
 }
 
 /**
+ * Formats review count into a compact label for map pins (e.g. 85, 420, 1.2k, 12k).
+ */
+export function formatCompactReviews(count) {
+  const n = Math.max(0, Math.round(Number(count) || 0));
+  if (n <= 0) return '';
+  if (n < 1000) return String(n);
+  if (n < 10000) {
+    const k = (n / 1000).toFixed(1).replace(/\.0$/, '');
+    return `${k}k`;
+  }
+  return `${Math.round(n / 1000)}k`;
+}
+
+/**
  * Builds a multi-stop car driving directions URL for Google Maps (2 to 10 stops).
  */
 export function buildGoogleMapsRouteUrl(stops) {

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Bookmark, Plus, Check, Map as MapIcon } from 'lucide-react';
+import { splitTextAndStatus } from '../utils/categoryStyle';
+import CategoryBadge from './CategoryBadge';
 
 export default function SaveToMapModal({
   place,
@@ -27,6 +29,9 @@ export default function SaveToMapModal({
   }, [place]);
 
   if (!place) return null;
+
+  const { status: addressStatus } = splitTextAndStatus(place.address);
+  const resolvedOpenStatus = place.openStatus || addressStatus;
 
   function handleCreate(e) {
     e.preventDefault();
@@ -63,9 +68,17 @@ export default function SaveToMapModal({
           {/* Target Place Summary */}
           <div className="p-3 rounded-2xl bg-slate-50 border border-slate-100">
             <p className="text-sm font-bold text-slate-900 line-clamp-1">{place.name}</p>
-            <p className="text-xs text-slate-500 mt-0.5 truncate">
-              {place.categoryLabel} · {place.rating ? `${place.rating.toFixed(1)} ★` : 'N/A'}
-            </p>
+            <div className="flex flex-wrap items-center gap-2 mt-1">
+              <CategoryBadge
+                label={place.categoryLabel}
+                type={place.type}
+                placeName={place.name}
+                openStatus={resolvedOpenStatus}
+              />
+              <span className="text-xs text-slate-500 font-medium">
+                {place.rating ? `${place.rating.toFixed(1)} ★` : 'N/A'}
+              </span>
+            </div>
           </div>
 
           {/* Existing Maps (Tick / Untick) */}

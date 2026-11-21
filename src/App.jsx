@@ -7,8 +7,10 @@ import PlaceCard from './components/PlaceCard';
 import PlaceModal from './components/PlaceModal';
 import SaveToMapModal from './components/SaveToMapModal';
 import SavedMapsView from './components/SavedMapsView';
+import ExitConfirmModal from './components/ExitConfirmModal';
 import { useSavedMaps } from './hooks/useSavedMaps';
 import { useSearchHistory } from './hooks/useSearchHistory';
+import { useMobileBackNavigation } from './hooks/useMobileBackNavigation';
 import { computeTrustScore } from './utils/geo';
 
 const CENTERS_STORAGE_KEY = 'analyzed_map_centers_v1';
@@ -110,6 +112,25 @@ export default function App() {
   // Two main modes: 'search' | 'saved'
   const [activeView, setActiveView] = useState('search');
   const [saveTargetPlace, setSaveTargetPlace] = useState(null);
+
+  const {
+    navigateToView,
+    openPlaceModal,
+    closePlaceModal,
+    openSaveModal,
+    closeSaveModal,
+    showExitConfirm,
+    exitFallbackHint,
+    handleCancelExit,
+    handleConfirmExit,
+  } = useMobileBackNavigation({
+    activeView,
+    setActiveView,
+    modalPlace,
+    setModalPlace,
+    saveTargetPlace,
+    setSaveTargetPlace,
+  });
 
   const {
     savedMaps,
@@ -608,7 +629,7 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-slate-50">
       <Header
         activeView={activeView}
-        onChangeView={setActiveView}
+        onChangeView={navigateToView}
         savedMapsCount={savedMaps.length}
         onSelectCenter={handleSetAndAddCenter}
         onError={setError}
@@ -627,8 +648,8 @@ export default function App() {
           onRenameMap={renameMap}
           onRemoveItem={removeItem}
           onUpdateItemMeta={updateItemMeta}
-          onOpenDetails={(p) => setModalPlace(p)}
-          onSwitchToSearch={() => setActiveView('search')}
+          onOpenDetails={openPlaceModal}
+          onSwitchToSearch={() => navigateToView('search')}
           onExportMaps={exportMapsJson}
           onImportMaps={importMapsJson}
         />
@@ -719,8 +740,8 @@ export default function App() {
                     isSelected={selectedPlace?.id === place.id}
                     isSaved={savedPlaceIds.has(place.id)}
                     onSelect={(p) => setSelectedPlace(p)}
-                    onOpenDetails={(p) => setModalPlace(p)}
-                    onSave={(p) => setSaveTargetPlace(p)}
+                    onOpenDetails={openPlaceModal}
+                    onSave={openSaveModal}
                     onSetCenter={(p) =>
                       handleSetAndAddCenter({
                         name: p.name,
@@ -771,7 +792,7 @@ export default function App() {
           savedMaps={savedMaps}
           onToggleMap={toggleMap}
           onCreateAndSave={createAndSave}
-          onClose={() => setSaveTargetPlace(null)}
+          onClose={closeSaveModal}
         />
       )}
 
@@ -779,10 +800,18 @@ export default function App() {
       {modalPlace && (
         <PlaceModal
           place={modalPlace}
-          onClose={() => setModalPlace(null)}
+          onClose={closePlaceModal}
           onEnriched={handlePlaceEnriched}
         />
       )}
+
+      {/* Mobile Back Exit Guard Modal */}
+      <ExitConfirmModal
+        isOpen={showExitConfirm}
+        showFallbackHint={exitFallbackHint}
+        onStay={handleCancelExit}
+        onConfirmExit={handleConfirmExit}
+      />
     </div>
   );
 }

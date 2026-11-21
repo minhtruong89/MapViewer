@@ -47,6 +47,7 @@ export default function SavedMapsView({
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [filterType, setFilterType] = useState('all');
   const [sortBy, setSortBy] = useState('default');
+  const [mapStatusFilter, setMapStatusFilter] = useState('all'); // 'all' | 'visited' | 'unvisited'
   const [importNotice, setImportNotice] = useState(null);
   const [drivingMap, setDrivingMap] = useState({});
   const [drivingStatus, setDrivingStatus] = useState('idle');
@@ -248,6 +249,16 @@ export default function SavedMapsView({
       }
     });
   }, [items, filterType, sortBy, selectedPlace, relativeDistances, drivingMap]);
+
+  const mapPlaces = useMemo(() => {
+    if (mapStatusFilter === 'visited') {
+      return displayedItems.filter((p) => Boolean(p.visited) || Boolean(p.alwaysShow));
+    }
+    if (mapStatusFilter === 'unvisited') {
+      return displayedItems.filter((p) => !p.visited || Boolean(p.alwaysShow));
+    }
+    return displayedItems;
+  }, [displayedItems, mapStatusFilter]);
 
   const firstWithCoords = displayedItems.find((it) => it.lat != null && it.lng != null);
   const fallbackCenter = firstWithCoords
@@ -613,7 +624,9 @@ export default function SavedMapsView({
                       </div>
                     ) : (
                       <p className="text-xs text-slate-500 mt-0.5">
-                        Hiển thị {displayedItems.length}/{items.length} điểm · Nhấp 1 địa điểm để xem khoảng cách ô tô tương đối
+                        {mapStatusFilter === 'all'
+                          ? `Hiển thị ${displayedItems.length}/${items.length} điểm · Nhấp 1 địa điểm để xem khoảng cách ô tô tương đối`
+                          : `Đang hiện ${mapPlaces.length}/${displayedItems.length} điểm trên bản đồ · Nhấp 1 địa điểm để xem khoảng cách ô tô tương đối`}
                       </p>
                     )}
                   </div>
@@ -751,12 +764,15 @@ export default function SavedMapsView({
                   <InteractiveMap
                     center={fallbackCenter}
                     radiusKm={5}
-                    places={displayedItems}
+                    places={mapPlaces}
                     selectedPlace={selectedPlace}
                     onSelectPlace={(p) => setSelectedPlace(p)}
                     showSearchCenter={false}
                     routeLine={routeInfo?.geometry || null}
                     routeStopNumbers={routeStopNumbers}
+                    mapStatusFilter={mapStatusFilter}
+                    onMapStatusFilterChange={setMapStatusFilter}
+                    fitKey={activeMap.id}
                   />
                 </div>
 
@@ -797,6 +813,14 @@ export default function SavedMapsView({
                               ? (p) =>
                                   onUpdateItemMeta(activeMap.id, p.id, {
                                     visited: !p.visited,
+                                  })
+                              : undefined
+                          }
+                          onToggleAlwaysShow={
+                            onUpdateItemMeta
+                              ? (p) =>
+                                  onUpdateItemMeta(activeMap.id, p.id, {
+                                    alwaysShow: !p.alwaysShow,
                                   })
                               : undefined
                           }

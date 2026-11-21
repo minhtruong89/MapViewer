@@ -230,10 +230,26 @@ app.get('/api/place-details', async (req, res) => {
     return res.status(400).json({ error: 'URL Google Maps không hợp lệ.' });
   }
 
+  const abortController = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      abortController.abort();
+    }
+  });
+
   try {
-    const details = await scrapePlaceDetails(url);
+    const details = await scrapePlaceDetails(url, { signal: abortController.signal });
+    if (res.writableEnded || res.destroyed) return;
     res.json(details);
   } catch (err) {
+    if (
+      err.name === 'AbortError' ||
+      abortController.signal.aborted ||
+      res.writableEnded ||
+      res.destroyed
+    ) {
+      return;
+    }
     console.error('Details error:', err);
     const status = err.code === 'CAPTCHA_BLOCKED' ? 429 : 500;
     res.status(status).json({

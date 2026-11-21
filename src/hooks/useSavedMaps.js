@@ -19,6 +19,7 @@ function sanitizePlaceItem(item) {
         ? item.distanceKm
         : null,
     categoryLabel: String(item.categoryLabel || ''),
+    openStatus: String(item.openStatus || ''),
     address: String(item.address || ''),
     phone: String(item.phone || ''),
     priceLevel: String(item.priceLevel || ''),
@@ -28,6 +29,7 @@ function sanitizePlaceItem(item) {
     mapsUrl: String(item.mapsUrl || ''),
     note: String(item.note || '').slice(0, 300),
     visited: Boolean(item.visited),
+    alwaysShow: Boolean(item.alwaysShow),
   };
 }
 
@@ -147,6 +149,7 @@ export function useSavedMaps() {
               ...it,
               ...('note' in patch ? { note: String(patch.note || '').slice(0, 300) } : {}),
               ...('visited' in patch ? { visited: Boolean(patch.visited) } : {}),
+              ...('alwaysShow' in patch ? { alwaysShow: Boolean(patch.alwaysShow) } : {}),
             };
           }),
         };

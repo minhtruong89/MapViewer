@@ -4,9 +4,17 @@ import fs from 'fs';
 import path from 'path';
 
 const PROFILE_DIR = path.resolve('.browser-profile');
-const IDLE_CLOSE_MS = 7 * 60 * 1000;
+const IDLE_CLOSE_MS = 30 * 60 * 1000;
 const DETAILS_CACHE_TTL_MS = 20 * 60 * 1000;
 const DETAILS_CACHE_MAX = 200;
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_CACHE_MAX = 30;
+const BLOCKED_TRACKER_RE =
+  /play\.google\.com\/log|google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com/i;
+const PLACE_STATUS_RE =
+  /(Đang mở cửa|Đã đóng cửa|Tạm thời đóng cửa|Đóng cửa vĩnh viễn|Sắp đóng cửa|Sắp mở cửa|Mở cửa cả ngày|Mở cửa 24 giờ|Open 24 hours|Open now|Temporarily closed|Permanently closed|Closes soon|Opens soon|Closed)/i;
+const PLACE_STATUS_SPLIT_RE =
+  /(Đang mở cửa|Đã đóng cửa|Tạm thời đóng cửa|Đóng cửa vĩnh viễn|Sắp đóng cửa|Sắp mở cửa|Mở cửa cả ngày|Mở cửa 24 giờ|Open 24 hours|Open now|Temporarily closed|Permanently closed|Closes soon|Opens soon|Closed)/gi;
 
 let contextInstance = null;
 let contextPromise = null;
@@ -16,6 +24,7 @@ let idleTimer = null;
 
 const DETAILS_CACHE = new Map();
 const INFLIGHT_DETAILS = new Map();
+const SEARCH_CACHE = new Map();
 
 /**
  * Creates a lightweight async concurrency limiter (semaphore).
@@ -102,7 +111,7 @@ async function launchPersistent(headless) {
       '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-dev-shm-usage',
-      ...(headless ? ['--disable-gpu', '--disable-extensions'] : []),
+      ...(headless ? ['--disable-extensions'] : []),
     ],
   };
 
@@ -269,6 +278,20 @@ function upgradePhotoUrl(url) {
 }
 
 /**
+ * Aborts unnecessary font, media, and telemetry requests to accelerate Maps scraping.
+ */
+async function attachResourceBlocker(page) {
+  await page.route('**/*', (route) => {
+    const req = route.request();
+    const type = req.resourceType();
+    if (type === 'font' || type === 'media' || BLOCKED_TRACKER_RE.test(req.url())) {
+      return route.abort().catch(() => {});
+    }
+    return route.continue().catch(() => {});
+  });
+}
+
+/**
  * Navigates to a URL with a single retry on transient network/timeout errors.
  */
 async function gotoWithRetry(page, url, timeout = 30000) {
@@ -330,20 +353,28 @@ async function scrapeSingleQuery({
   const page = await context.newPage();
 
   try {
+    await attachResourceBlocker(page);
     const zoom = zoomOverride ?? radiusToZoom(radiusKm);
     const targetUrl = `https://www.google.com/maps/search/${encodeURIComponent(
       searchTerm
     )}/@${searchLat},${searchLng},${zoom}z?hl=vi`;
 
     await gotoWithRetry(page, targetUrl, 30000);
-    await page.waitForTimeout(2000);
-    await checkPageAndConsent(page);
 
-    // Wait for results feed or a direct single-place panel (h1.DUwDvf)
+    // Wait immediately for results feed, single place, consent, or captcha rather than sleeping blindly
     const feedSelector = 'div[role="feed"]';
     await page
-      .waitForSelector(`${feedSelector}, a.hfpxzc, h1.DUwDvf`, { timeout: 15000 })
+      .waitForSelector(
+        `${feedSelector}, a.hfpxzc, h1.DUwDvf, form[action*="consent"], #captcha-form`,
+        { timeout: 15000 }
+      )
       .catch(() => {});
+    await checkPageAndConsent(page);
+    if ((await page.locator(`${feedSelector}, a.hfpxzc, h1.DUwDvf`).count()) === 0) {
+      await page
+        .waitForSelector(`${feedSelector}, a.hfpxzc, h1.DUwDvf`, { timeout: 10000 })
+        .catch(() => {});
+    }
 
     const hasFeed = (await page.locator(feedSelector).count()) > 0;
     if (!hasFeed) {
@@ -415,6 +446,7 @@ async function scrapeSingleQuery({
           reviewCount: Number.isNaN(reviewCount) ? 0 : reviewCount,
           distanceKm,
           categoryLabel: single.categoryLabel || (type === 'lodging' ? 'Nơi ở' : 'Ăn uống'),
+          openStatus: '',
           address: single.address.replace(/[\uE000-\uF8FF]/g, '').trim(),
           phone: single.phone.replace(/[\uE000-\uF8FF]/g, '').trim(),
           priceLevel: '',
@@ -450,7 +482,7 @@ async function scrapeSingleQuery({
         }
       }, feedSelector);
 
-      await page.waitForTimeout(stagnantRounds > 0 ? 1500 : 900);
+      await page.waitForTimeout(stagnantRounds > 0 ? 1100 : 700);
 
       const endReached = await page.evaluate(() => {
         const text = document.body.innerText;
@@ -462,21 +494,29 @@ async function scrapeSingleQuery({
       if (endReached) break;
     }
 
-    // Scroll any cards whose lazy-loaded thumbnail hasn't rendered yet into view
-    await page.evaluate(async () => {
+    // Scroll cards that actually have an <img> element without loaded thumbnail into view
+    const scrolledCount = await page.evaluate(async () => {
       const cards = Array.from(document.querySelectorAll('div.Nv2PK'));
+      let count = 0;
       for (const card of cards) {
-        const hasImg = Array.from(card.querySelectorAll('img')).some((img) => {
+        if (count >= 15) break;
+        const imgs = Array.from(card.querySelectorAll('img'));
+        if (imgs.length === 0) continue;
+        const hasImg = imgs.some((img) => {
           const s = img.currentSrc || img.getAttribute('src') || '';
           return s.includes('googleusercontent.com') || s.includes('streetviewpixels');
         });
         if (!hasImg) {
           card.scrollIntoView({ behavior: 'instant', block: 'center' });
-          await new Promise((r) => setTimeout(r, 250));
+          count++;
+          await new Promise((r) => setTimeout(r, 120));
         }
       }
+      return count;
     });
-    await page.waitForTimeout(900);
+    if (scrolledCount > 0) {
+      await page.waitForTimeout(400);
+    }
 
     const rawPlaces = await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('div.Nv2PK'));
@@ -567,11 +607,13 @@ async function scrapeSingleQuery({
         }
       }
 
-      // Extract category, price, and address from infoBlocks (strip icon glyphs)
+      // Extract category, open status, price, and address from infoBlocks (strip icon glyphs)
       const detailLine = (
         item.infoBlocks.find((b) => b && !b.includes(item.ratingText)) || ''
       )
         .replace(/[\uE000-\uF8FF]/g, '')
+        .replace(PLACE_STATUS_SPLIT_RE, ' · $1')
+        .replace(/\s*·\s*·\s*/g, ' · ')
         .trim();
       const parts = detailLine
         .split('·')
@@ -579,12 +621,22 @@ async function scrapeSingleQuery({
         .filter(Boolean);
 
       let categoryLabel = type === 'lodging' ? 'Nơi ở' : 'Ăn uống';
+      let openStatus = '';
       let address = '';
       let priceLevel = '';
 
       for (const part of parts) {
         if (/^[₫$]+$/.test(part) || /\d+\s*₫/.test(part)) {
           priceLevel = part;
+        } else if (PLACE_STATUS_RE.test(part)) {
+          const statusMatch = part.match(PLACE_STATUS_RE);
+          if (!openStatus && statusMatch) {
+            openStatus = statusMatch[1];
+          }
+          const stripped = part.replace(PLACE_STATUS_SPLIT_RE, '').trim();
+          if (stripped && !address && stripped.length < 28 && !/\d/.test(stripped)) {
+            categoryLabel = stripped;
+          }
         } else if ((!categoryLabel || part.length < 28) && !/\d/.test(part) && !address) {
           categoryLabel = part;
         } else if (!address) {
@@ -592,21 +644,50 @@ async function scrapeSingleQuery({
         }
       }
 
+      categoryLabel = categoryLabel
+        .replace(PLACE_STATUS_SPLIT_RE, '')
+        .replace(/\s*[·•\-|]+\s*$/g, '')
+        .trim();
+      if (!categoryLabel) {
+        categoryLabel = type === 'lodging' ? 'Nơi ở' : 'Ăn uống';
+      }
+
       if (!address && parts.length > 1) {
-        address = parts[parts.length - 1];
+        const lastPart = parts[parts.length - 1];
+        if (!PLACE_STATUS_RE.test(lastPart)) {
+          address = lastPart;
+        }
       }
 
       if (address) {
+        if (!openStatus) {
+          const statusFromAddress = address.match(PLACE_STATUS_RE);
+          if (statusFromAddress) {
+            openStatus = statusFromAddress[1];
+          }
+        }
         address = address
-          .replace(/(Đang mở cửa|Đã đóng cửa|Sắp đóng cửa|Sắp mở cửa|Mở cửa cả ngày)/g, ' · $1')
+          .replace(PLACE_STATUS_SPLIT_RE, ' · $1')
+          .replace(
+            /(?:\s*[·•⋅\-|]\s*)?(?:Đóng cửa lúc|Mở cửa lúc|Closes|Opens)\s+[^·•⋅|]+/gi,
+            ''
+          )
+          .replace(new RegExp(PLACE_STATUS_RE.source, 'gi'), ' · ')
           .replace(/(\+84[\d\s.-]{7,})/g, ' · $1')
-          .replace(/^\s*·\s*/, '')
-          .replace(/\s*·\s*·\s*/g, ' · ')
+          .replace(/(?:\s*[·•⋅|]\s*)+/g, ' · ')
+          .replace(/^(?:\s*[·•⋅\-|]+\s*)+|(?:\s*[·•⋅|]+\s*|\s+-\s*)+$/g, '')
+          .replace(/\s{2,}/g, ' ')
           .trim();
       }
 
-      // Extract phone number from infoBlocks or address if present
+      // Extract open status & phone number from infoBlocks if present
       const allInfoText = item.infoBlocks.join(' · ').replace(/[\uE000-\uF8FF]/g, '');
+      if (!openStatus) {
+        const statusFromAll = allInfoText.match(PLACE_STATUS_RE);
+        if (statusFromAll) {
+          openStatus = statusFromAll[1];
+        }
+      }
       const phoneMatch = allInfoText.match(/(\+84[\d\s.-]{7,}|0\d{2,3}[\s.-]?\d{3}[\s.-]?\d{3,4})/);
       const phone = phoneMatch ? phoneMatch[1].trim() : '';
 
@@ -639,6 +720,7 @@ async function scrapeSingleQuery({
         reviewCount: Number.isNaN(reviewCount) ? 0 : reviewCount,
         distanceKm,
         categoryLabel,
+        openStatus,
         address,
         phone,
         priceLevel,
@@ -652,23 +734,46 @@ async function scrapeSingleQuery({
     }
 
     // If Google Maps rendered compact text-only cards or omitted street address (e.g. hotels),
-    // fetch hero thumbnails & full address from the place page for small result sets
+    // reuse DETAILS_CACHE first, then fetch hero thumbnails & full address in batches of 4
     const needDetails = results.filter(
       (r) => !r.imageUrl || !r.address || /^(Khách sạn \d sao|Cửa hàng|\+84)/i.test(r.address)
     );
     if (results.length <= 15 && needDetails.length > 0) {
-      for (let i = 0; i < needDetails.length; i += 2) {
-        const batch = needDetails.slice(i, i + 2);
+      const toScrape = [];
+      for (const item of needDetails) {
+        const cleanUrl = item.mapsUrl.split('?')[0] + '?hl=vi';
+        const cached = DETAILS_CACHE.get(cleanUrl);
+        if (cached && Date.now() < cached.expiresAt) {
+          DETAILS_CACHE.delete(cleanUrl);
+          DETAILS_CACHE.set(cleanUrl, cached);
+          const extra = cached.data;
+          if (!item.imageUrl && extra.photos?.[0]) {
+            item.imageUrl = upgradePhotoUrl(extra.photos[0]);
+          }
+          if (extra.address) {
+            item.address = extra.address;
+          }
+          if (!item.phone && extra.phone) {
+            item.phone = extra.phone;
+          }
+        } else {
+          toScrape.push(item);
+        }
+      }
+
+      for (let i = 0; i < toScrape.length; i += 4) {
+        const batch = toScrape.slice(i, i + 4);
         await Promise.all(
           batch.map(async (item) => {
             const thumbPage = await context.newPage();
             try {
+              await attachResourceBlocker(thumbPage);
               const cleanUrl = item.mapsUrl.split('?')[0] + '?hl=vi';
               await gotoWithRetry(thumbPage, cleanUrl, 15000);
               await thumbPage
                 .waitForSelector(
                   'button[jsaction*="heroHeaderImage"] img, button.aoRNLd img, button[data-item-id="address"]',
-                  { timeout: 6000 }
+                  { timeout: 4500 }
                 )
                 .catch(() => {});
               const extra = await thumbPage.evaluate(() => {
@@ -723,6 +828,22 @@ export async function scrapeGoogleMaps({
   customQuery = '',
   maxResults = 30,
 }) {
+  const searchCacheKey = `${Number(lat).toFixed(4)}|${Number(lng).toFixed(4)}|${radiusKm}|${category}|${String(
+    customQuery || ''
+  )
+    .trim()
+    .toLowerCase()}|${maxResults}`;
+
+  const cachedSearch = SEARCH_CACHE.get(searchCacheKey);
+  if (cachedSearch) {
+    if (Date.now() < cachedSearch.expiresAt) {
+      SEARCH_CACHE.delete(searchCacheKey);
+      SEARCH_CACHE.set(searchCacheKey, cachedSearch);
+      return cachedSearch.data.map((p) => ({ ...p }));
+    }
+    SEARCH_CACHE.delete(searchCacheKey);
+  }
+
   return searchLimiter(() =>
     withBrowserActivity(async () => {
       const tasks = [];
@@ -776,15 +897,61 @@ export async function scrapeGoogleMaps({
         }
       }
 
+      if (allResults.length > 0) {
+        if (SEARCH_CACHE.size >= SEARCH_CACHE_MAX) {
+          const oldestKey = SEARCH_CACHE.keys().next().value;
+          if (oldestKey !== undefined) SEARCH_CACHE.delete(oldestKey);
+        }
+        SEARCH_CACHE.set(searchCacheKey, {
+          data: allResults.map((p) => ({ ...p })),
+          expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+        });
+      }
+
       return allResults;
     })
   );
 }
 
+function createAbortError() {
+  const err = new Error('Đã hủy yêu cầu tải chi tiết.');
+  err.name = 'AbortError';
+  return err;
+}
+
+function raceWithSignal(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (val) => {
+        cleanup();
+        resolve(val);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      }
+    );
+  });
+}
+
 /**
  * Fetches additional photos & metadata for a specific Google Maps place URL.
+ * Supports caller cancellation via options.signal so abandoned background requests close immediately.
  */
-export async function scrapePlaceDetails(mapsUrl) {
+export async function scrapePlaceDetails(mapsUrl, options = {}) {
+  const { signal } = options;
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+
   const cleanUrl = mapsUrl.split('?')[0] + '?hl=vi';
 
   const cached = DETAILS_CACHE.get(cleanUrl);
@@ -798,97 +965,149 @@ export async function scrapePlaceDetails(mapsUrl) {
     DETAILS_CACHE.delete(cleanUrl);
   }
 
-  if (INFLIGHT_DETAILS.has(cleanUrl)) {
-    return INFLIGHT_DETAILS.get(cleanUrl);
+  let entry = INFLIGHT_DETAILS.get(cleanUrl);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = { controller, waiters: 0, promise: null };
+
+    entry.promise = (async () => {
+      try {
+        const details = await detailsLimiter(() =>
+          withBrowserActivity(async () => {
+            if (controller.signal.aborted) {
+              throw createAbortError();
+            }
+
+            const context = await getContext();
+            if (controller.signal.aborted) {
+              throw createAbortError();
+            }
+
+            const page = await context.newPage();
+            const onAbortPage = () => {
+              page.close().catch(() => {});
+            };
+            controller.signal.addEventListener('abort', onAbortPage, { once: true });
+
+            try {
+              await attachResourceBlocker(page);
+              await gotoWithRetry(page, cleanUrl, 30000);
+              if (controller.signal.aborted) throw createAbortError();
+
+              await page
+                .waitForSelector(
+                  'h1.DUwDvf, button[jsaction*="photo"], button[data-item-id="address"], form[action*="consent"], #captcha-form',
+                  { timeout: 12000 }
+                )
+                .catch(() => {});
+              await checkPageAndConsent(page);
+              await page.waitForTimeout(400);
+              if (controller.signal.aborted) throw createAbortError();
+
+              const scraped = await page.evaluate(() => {
+                const clean = (s) => (s || '').replace(/[\uE000-\uF8FF]/g, '').trim();
+                const address = clean(
+                  document.querySelector('button[data-item-id="address"]')?.textContent
+                );
+                const phone = clean(
+                  document.querySelector('button[data-item-id^="phone:"]')?.textContent
+                );
+                const website =
+                  document.querySelector('a[data-item-id="authority"]')?.getAttribute('href') ||
+                  '';
+                const hours = clean(
+                  document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label')
+                );
+
+                const photoUrls = new Set();
+                const imgs = Array.from(document.querySelectorAll('img'));
+                for (const img of imgs) {
+                  const src = img.getAttribute('src') || '';
+                  if (
+                    (src.includes('googleusercontent.com') || src.includes('streetviewpixels')) &&
+                    !src.includes('/a/') &&
+                    !src.includes('=s32') &&
+                    !src.includes('=s40')
+                  ) {
+                    photoUrls.add(src);
+                  }
+                }
+
+                return {
+                  address,
+                  phone,
+                  website,
+                  hours,
+                  photos: Array.from(photoUrls).slice(0, 12),
+                };
+              });
+
+              scraped.photos = scraped.photos
+                .map((u) => u.replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w1000-h750-k-no'))
+                .filter(Boolean);
+
+              return scraped;
+            } catch (err) {
+              if (controller.signal.aborted) {
+                throw createAbortError();
+              }
+              throw err;
+            } finally {
+              controller.signal.removeEventListener('abort', onAbortPage);
+              await page.close().catch(() => {});
+            }
+          })
+        );
+
+        if (
+          details.photos.length > 0 ||
+          details.address ||
+          details.phone ||
+          details.website ||
+          details.hours
+        ) {
+          if (DETAILS_CACHE.size >= DETAILS_CACHE_MAX) {
+            const oldestKey = DETAILS_CACHE.keys().next().value;
+            if (oldestKey !== undefined) DETAILS_CACHE.delete(oldestKey);
+          }
+          DETAILS_CACHE.set(cleanUrl, {
+            data: details,
+            expiresAt: Date.now() + DETAILS_CACHE_TTL_MS,
+          });
+        }
+
+        return details;
+      } finally {
+        INFLIGHT_DETAILS.delete(cleanUrl);
+      }
+    })();
+
+    // Prevent unhandled rejection logs if all callers cancel early before completion
+    entry.promise.catch(() => {});
+    INFLIGHT_DETAILS.set(cleanUrl, entry);
   }
 
-  const task = (async () => {
-    try {
-      const details = await detailsLimiter(() =>
-        withBrowserActivity(async () => {
-          const context = await getContext();
-          const page = await context.newPage();
-
-          try {
-            await gotoWithRetry(page, cleanUrl, 30000);
-            await page.waitForTimeout(2000);
-            await checkPageAndConsent(page);
-
-            await page
-              .waitForSelector('h1.DUwDvf, button[jsaction*="photo"]', { timeout: 15000 })
-              .catch(() => {});
-
-            const scraped = await page.evaluate(() => {
-              const clean = (s) => (s || '').replace(/[\uE000-\uF8FF]/g, '').trim();
-              const address = clean(
-                document.querySelector('button[data-item-id="address"]')?.textContent
-              );
-              const phone = clean(
-                document.querySelector('button[data-item-id^="phone:"]')?.textContent
-              );
-              const website =
-                document.querySelector('a[data-item-id="authority"]')?.getAttribute('href') || '';
-              const hours = clean(
-                document.querySelector('[aria-label*="Giờ"]')?.getAttribute('aria-label')
-              );
-
-              const photoUrls = new Set();
-              const imgs = Array.from(document.querySelectorAll('img'));
-              for (const img of imgs) {
-                const src = img.getAttribute('src') || '';
-                if (
-                  (src.includes('googleusercontent.com') || src.includes('streetviewpixels')) &&
-                  !src.includes('/a/') &&
-                  !src.includes('=s32') &&
-                  !src.includes('=s40')
-                ) {
-                  photoUrls.add(src);
-                }
-              }
-
-              return {
-                address,
-                phone,
-                website,
-                hours,
-                photos: Array.from(photoUrls).slice(0, 12),
-              };
-            });
-
-            scraped.photos = scraped.photos
-              .map((u) => u.replace(/=[ws]\d+(-h\d+)?[^&]*/i, '=w1000-h750-k-no'))
-              .filter(Boolean);
-
-            return scraped;
-          } finally {
-            await page.close().catch(() => {});
-          }
-        })
-      );
-
-      if (
-        details.photos.length > 0 ||
-        details.address ||
-        details.phone ||
-        details.website ||
-        details.hours
-      ) {
-        if (DETAILS_CACHE.size >= DETAILS_CACHE_MAX) {
-          const oldestKey = DETAILS_CACHE.keys().next().value;
-          if (oldestKey !== undefined) DETAILS_CACHE.delete(oldestKey);
-        }
-        DETAILS_CACHE.set(cleanUrl, {
-          data: details,
-          expiresAt: Date.now() + DETAILS_CACHE_TTL_MS,
-        });
-      }
-
-      return details;
-    } finally {
-      INFLIGHT_DETAILS.delete(cleanUrl);
+  entry.waiters++;
+  let released = false;
+  const releaseWaiter = () => {
+    if (released) return;
+    released = true;
+    entry.waiters--;
+    if (entry.waiters <= 0) {
+      entry.controller.abort();
     }
-  })();
+  };
 
-  INFLIGHT_DETAILS.set(cleanUrl, task);
-  return task;
+  if (signal) {
+    signal.addEventListener('abort', releaseWaiter, { once: true });
+  }
+
+  try {
+    return await raceWithSignal(entry.promise, signal);
+  } finally {
+    if (signal) {
+      signal.removeEventListener('abort', releaseWaiter);
+    }
+    releaseWaiter();
+  }
 }

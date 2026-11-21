@@ -12,6 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+import { splitTextAndStatus } from '../utils/categoryStyle';
+import CategoryBadge from './CategoryBadge';
 
 export default function PlaceModal({ place, onClose, onEnriched }) {
   const [details, setDetails] = useState(null);
@@ -90,6 +92,11 @@ export default function PlaceModal({ place, onClose, onEnriched }) {
 
   const currentPhoto = photos[activeIdx] || null;
   const displayPhone = details?.phone || place.phone;
+  const { text: cleanAddress, status: detailAddressStatus } = splitTextAndStatus(
+    details?.address || place.address
+  );
+  const resolvedOpenStatus =
+    place.openStatus || detailAddressStatus || splitTextAndStatus(place.address).status;
 
   return (
     <div
@@ -103,7 +110,7 @@ export default function PlaceModal({ place, onClose, onEnriched }) {
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-100 flex items-start justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex flex-wrap items-center gap-2 mb-1">
               <span
                 className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
                   place.type === 'lodging'
@@ -113,6 +120,18 @@ export default function PlaceModal({ place, onClose, onEnriched }) {
               >
                 {place.type === 'lodging' ? 'Nơi ở' : 'Ăn uống'}
               </span>
+              {(resolvedOpenStatus ||
+                (place.categoryLabel &&
+                  !['nơi ở', 'ăn uống'].includes(
+                    place.categoryLabel.trim().toLowerCase()
+                  ))) && (
+                <CategoryBadge
+                  label={place.categoryLabel}
+                  type={place.type}
+                  placeName={place.name}
+                  openStatus={resolvedOpenStatus}
+                />
+              )}
               {place.distanceKm !== null && (
                 <span className="text-xs text-slate-500 font-medium">
                   Cách tâm {place.distanceKm} km
@@ -237,10 +256,10 @@ export default function PlaceModal({ place, onClose, onEnriched }) {
           )}
 
           <div className="space-y-2.5 text-sm text-slate-700">
-            {(details?.address || place.address) && (
+            {cleanAddress && (
               <div className="flex items-start gap-2.5">
                 <MapPin className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-                <span>{details?.address || place.address}</span>
+                <span>{cleanAddress}</span>
               </div>
             )}
             {details?.hours && (
